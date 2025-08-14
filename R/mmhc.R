@@ -471,3 +471,229 @@ g2 <- function( data, sizes, x, y, chi.th = 0.05, z=c(), min.counts = 5)
 
   return( max(pchisq(stat[1],stat[2]) - 1+chi.th, 0) )
 }
+
+hc_w_disc <- function( data, node.sizes, scoring.func = 0, cpc, cont.nodes = c(), ess = 1, tabu.tenure = 100, 
+                max.parents = length(node.sizes)-1,
+                init.net = NULL, wm.max=15, layering=NULL, layer.struct=NULL,
+                mandatory.edges = NULL )
+{
+  n.nodes <- ncol(data)
+  n.cases <- nrow(data)
+
+  # just to be sure
+  storage.mode( node.sizes ) <- "integer"
+  
+  # store original data
+  oiginal.data <- data
+
+  # quantize data of continuous nodes 
+  levels <- rep( 0, n.nodes )
+  levels[cont.nodes] <- node.sizes[cont.nodes]
+  
+  # data <- quantize.with.na.matrix( data, levels )
+  # data <- quantize.matrix( data, levels )
+  out.data <- quantize.matrix( data, levels )
+  data <- out.data$quant
+  curr.discretization <- out.data$quantiles
+  # quantiles(bn) <- out.data$quantiles
+  # quantiles(dataset) <- out.data$quantiles
+
+  # apply mandatory edges (if present)
+  m.edges <- matrix(0L, n.nodes, n.nodes)
+  if (!is.null(mandatory.edges)) {
+    m.edges <- m.edges | mandatory.edges
+  }
+  storage.mode(m.edges) <- "integer"
+  
+  # start with init.net if not NULL, otherwise with empty matrix
+  if( !is.null(init.net) )
+  {
+    curr.g <- init.net
+    # just to be sure 
+    storage.mode( curr.g ) <- "integer" 
+    # add init edges out of cpc
+    cpc <- cpc | init.net | t(init.net)
+  }
+  else
+    curr.g <- matrix(0L,n.nodes,n.nodes) # integers!  
+  curr.g <- curr.g | m.edges
+
+  # apply layering
+  if (!is.null(layer.struct) && is.null(layering)) {
+      stop("layer.struct provided without layering.\n")
+  }
+  if ( !is.null(layering) && length(unique(layering)) > 1 ) {
+      n.layers <- length(unique(layering))
+
+      if (is.null(layer.struct)) {
+          layer.struct <- matrix(1L, n.layers, n.layers)
+          layer.struct[lower.tri(layer.struct)] <- 0
+          layer.struct[1,1] <- 0
+      }
+
+      layers <- matrix(1L, n.nodes, n.nodes)
+      for (i in 1:n.layers) {
+          for (j in 1:n.layers) {
+              layers[which(layering == i), which(layering == j)] <- layer.struct[i, j]
+          }
+      }
+      diag(layers) <- 0
+
+      # keep only edges allowed by both the CPC / initial network and the layering
+      cpc <- cpc & layers
+      
+      if (sum(m.edges | t(m.edges)) > 0L && sum(curr.g & layers) == 0L) {
+        stop("the mandatory edges provided are inconsistent with the given layering.\n")
+      }
+  }
+  # end apply layering
+  
+  curr.score.nodes <- array(0,n.nodes)
+  for( i in 1L:n.nodes )
+    curr.score.nodes[i] <- .Call( "bnstruct_score_node", data, node.sizes, i-1L, which(curr.g[,i]!=0)-1L,
+                                  scoring.func, ess, PACKAGE = "bnstruct" )
+
+  # global best solution
+  global.best.g <- curr.g
+  global.best.score <- sum(curr.score.nodes)
+  
+  # tabu list
+  tabu <- array(0L, c(n.nodes,n.nodes,tabu.tenure))
+  tabu.pt <- 1
+  
+  # worsening moves
+  wm.count <- 0
+  #wm.max <- 15
+  while( wm.count < wm.max )
+  {
+    next.score.diff <- rep(-Inf,n.nodes)
+    next.pert <- rep(-1L,n.nodes)
+    # print(tabu[,,1:10])
+    # try all possible perturbations
+    for( node in 1L:n.nodes )
+    {
+      for( par in 1L:n.nodes )
+      {
+        if( cpc[par,node] == 1L && (m.edges[par,node] == 0 && m.edges[node,par] == 0))
+        {
+          next.g <- curr.g;
+          s.diff <- -Inf
+        
+          if( curr.g[par,node] == 1L ) # edge removal
+          {
+            next.g[par,node] = 0L;
+            if( .Call("bnstruct_is_acyclic", next.g, PACKAGE = "bnstruct") &!.Call("bnstruct_in_tabu", next.g, tabu, PACKAGE = "bnstruct"))
+            {
+#               cat(node.sizes,'\t',node-1L,'\t',which(next.g[,node]!=0)-1L,'\n')
+              s.diff <- .Call( "bnstruct_score_node", data, node.sizes, node-1L, which(next.g[,node]!=0)-1L, 
+                               scoring.func, ess, PACKAGE = "bnstruct" ) - curr.score.nodes[node];
+            }
+          }
+          # edge addition
+          # check also if there is room for one more parent
+          else if( curr.g[node,par] == 0L && sum(curr.g[,node]) < max.parents ) 
+          {
+            next.g[par,node] = 1L;
+            # print(c(node,par,.Call("is_acyclic", next.g, PACKAGE = "bnstruct"),!.Call("in_tabu", next.g, tabu, PACKAGE = "bnstruct")))
+            if( .Call("bnstruct_is_acyclic", next.g, PACKAGE = "bnstruct") & !.Call("bnstruct_in_tabu", next.g, tabu, PACKAGE = "bnstruct"))
+            {
+              # print("here\n");
+              
+#               cat(node.sizes,'\t',node-1L,'\t',which(next.g[,node]!=0)-1L,'\n')
+              s.diff <- .Call( "bnstruct_score_node", data, node.sizes, node-1L, which(next.g[,node]!=0)-1L,
+                               scoring.func, ess, PACKAGE = "bnstruct" ) - curr.score.nodes[node];
+            }
+          }
+          # edge reversal
+          # check also if there is room for one more parent
+          else if ( sum(curr.g[,node]) < max.parents )
+          {
+            next.g[par,node] = 1L;
+            next.g[node,par] = 0L;
+            if( .Call("bnstruct_is_acyclic", next.g, PACKAGE = "bnstruct") & !.Call("bnstruct_in_tabu", next.g, tabu, PACKAGE = "bnstruct"))
+            {
+#               cat(node.sizes,'\t',node-1L,'\t',which(next.g[,node]!=0)-1L,'\t',par-1L,'\t',which(next.g[,par]!=0)-1L,'\n')
+              s.diff <- .Call( "bnstruct_score_node", data, node.sizes, node-1L, which(next.g[,node]!=0)-1L,
+                               scoring.func, ess, PACKAGE = "bnstruct" ) + 
+                        .Call( "bnstruct_score_node", data, node.sizes, par-1L, which(next.g[,par]!=0)-1L,
+                               scoring.func, ess, PACKAGE = "bnstruct" ) -
+                        ( curr.score.nodes[node] + curr.score.nodes[par] )
+            }
+          }
+          # test for local improvement
+          if( s.diff > next.score.diff[node] )
+          {
+            next.score.diff[node] <- s.diff
+            next.pert[node] <- par
+          }
+        }
+      }
+    }
+    
+    best.node <- which.max(next.score.diff)
+    
+    # no possible improvements given the tabu list
+    if( next.score.diff[best.node] == -Inf )
+      break
+    # save old graph
+    old.g <- curr.g
+    # update current graph and scores
+    curr.g[next.pert[best.node],best.node] = 1L - curr.g[next.pert[best.node],best.node] # flip
+    if( curr.g[best.node,next.pert[best.node]] == 1L) # need to reverse
+    {
+      curr.g[best.node,next.pert[best.node]] = 0L;
+      # cat(node.sizes,'\t',best.node-1L,'\t',which(curr.g[,best.node]!=0)-1L,'\t',next.pert[best.node]-1L,'\t',which(curr.g[,next.pert[best.node]]!=0)-1L,'\n')
+      curr.score.nodes[best.node] <- .Call( "bnstruct_score_node", data, node.sizes, best.node-1L, 
+                                            which(curr.g[,best.node]!=0)-1L, scoring.func, ess, PACKAGE = "bnstruct" )
+      curr.score.nodes[next.pert[best.node]] <- .Call( "bnstruct_score_node", data, node.sizes, next.pert[best.node]-1L, 
+                                            which(curr.g[,next.pert[best.node]]!=0)-1L, scoring.func, ess, PACKAGE = "bnstruct" )
+    }
+    else
+      curr.score.nodes[best.node] = curr.score.nodes[best.node] + next.score.diff[best.node]
+    
+    # detect continuous nodes affected by the perturbation and run discretization routine
+    affected <- detect_affected_continuous_vars(old.g, curr.g, cont.nodes)
+
+    if (length(affected)>0)
+    {
+      data[, affected] <- original.data[, affected]
+      out.disc <- 1#TODO: call to C implementation
+      
+      curr.discretization <- out.disc$disc_edges
+      data <- apply_discretization(data, curr.discretization)
+      node.sizes[affected] <- lapply(curr.discretization[affected], length) - 1
+
+      # recalculate scores for affected nodes
+      for (i in affected) 
+      {
+        # affected
+        curr.score.nodes[i] <- .Call( "bnstruct_score_node", data, node.sizes, i-1L, which(curr.g[,i]!=0)-1L,
+                                      scoring.func, ess, PACKAGE = "bnstruct" )
+        # affected children
+        children <- which(curr.g[i,] != 0)
+        for (j in children) 
+        {
+          curr.score.nodes[j] <- .Call( "bnstruct_score_node", data, node.sizes, j-1L, which(curr.g[,j]!=0)-1L,
+                                        scoring.func, ess, PACKAGE = "bnstruct" )
+        }
+      }
+    }
+    # print(c(tabu.pt,best.node,next.pert[best.node],sum(curr.score.nodes)))
+    
+    if( global.best.score < sum(curr.score.nodes) ) # check for global best
+    {
+      wm.count <- 0
+      global.best.g <- curr.g
+      global.best.score <- sum(curr.score.nodes)
+    }
+    else
+      wm.count <- wm.count + 1
+    
+    # update tabu list
+    tabu[,,tabu.pt] <- curr.g
+    tabu.pt <- (tabu.pt)%%tabu.tenure + 1
+    # print(curr.g)
+  }
+  
+  return(global.best.g)
+}
