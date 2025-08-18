@@ -3,8 +3,7 @@
 #include <stdlib.h> // for NULL
 #include <R_ext/Rdynload.h>
 
-
-/* FIXME: 
+/* FIXME:
    Check these declarations against the C/Fortran source code.
 */
 
@@ -21,26 +20,37 @@ extern SEXP bnstruct_in_tabu(SEXP, SEXP);
 extern SEXP bnstruct_is_acyclic(SEXP);
 extern SEXP bnstruct_next_comb(SEXP, SEXP);
 extern SEXP bnstruct_score_node(SEXP, SEXP, SEXP, SEXP, SEXP, SEXP);
+extern SEXP bnstruct_dvbn_discretize_one(SEXP, SEXP,
+                                         SEXP, SEXP,
+                                         SEXP, SEXP, SEXP,
+                                         SEXP, SEXP,
+                                         SEXP);
+
+extern SEXP bnstruct_dvbn_discretize_all(SEXP, SEXP,
+                                         SEXP, SEXP,
+                                         SEXP, SEXP,
+                                         SEXP, SEXP, SEXP,
+                                         SEXP, SEXP);
 
 static const R_CallMethodDef CallEntries[] = {
-    {"bnstruct_all_fam_log_marg_lik", (DL_FUNC) &bnstruct_all_fam_log_marg_lik, 5},
-    {"bnstruct_compute_counts",       (DL_FUNC) &bnstruct_compute_counts,       2},
-    {"bnstruct_compute_counts_nas",   (DL_FUNC) &bnstruct_compute_counts_nas,   2},
-    {"bnstruct_fbp",                  (DL_FUNC) &bnstruct_fbp,                  1},
-    {"bnstruct_fbs",                  (DL_FUNC) &bnstruct_fbs,                  2},
-    {"bnstruct_fumt_mask",            (DL_FUNC) &bnstruct_fumt_mask,            2},
-    {"bnstruct_g2_stat",              (DL_FUNC) &bnstruct_g2_stat,              2},
-    {"bnstruct_heom_dist",            (DL_FUNC) &bnstruct_heom_dist,            4},
-    {"bnstruct_in_tabu",              (DL_FUNC) &bnstruct_in_tabu,              2},
-    {"bnstruct_is_acyclic",           (DL_FUNC) &bnstruct_is_acyclic,           1},
-    {"bnstruct_next_comb",            (DL_FUNC) &bnstruct_next_comb,            2},
-    {"bnstruct_score_node",           (DL_FUNC) &bnstruct_score_node,           6},
-    {NULL, NULL, 0}
-};
+    {"bnstruct_all_fam_log_marg_lik", (DL_FUNC)&bnstruct_all_fam_log_marg_lik, 5},
+    {"bnstruct_compute_counts", (DL_FUNC)&bnstruct_compute_counts, 2},
+    {"bnstruct_compute_counts_nas", (DL_FUNC)&bnstruct_compute_counts_nas, 2},
+    {"bnstruct_fbp", (DL_FUNC)&bnstruct_fbp, 1},
+    {"bnstruct_fbs", (DL_FUNC)&bnstruct_fbs, 2},
+    {"bnstruct_fumt_mask", (DL_FUNC)&bnstruct_fumt_mask, 2},
+    {"bnstruct_g2_stat", (DL_FUNC)&bnstruct_g2_stat, 2},
+    {"bnstruct_heom_dist", (DL_FUNC)&bnstruct_heom_dist, 4},
+    {"bnstruct_in_tabu", (DL_FUNC)&bnstruct_in_tabu, 2},
+    {"bnstruct_is_acyclic", (DL_FUNC)&bnstruct_is_acyclic, 1},
+    {"bnstruct_next_comb", (DL_FUNC)&bnstruct_next_comb, 2},
+    {"bnstruct_score_node", (DL_FUNC)&bnstruct_score_node, 6},
+    {"bnstruct_dvbn_discretize_one", (DL_FUNC)&bnstruct_dvbn_discretize_one, 10},
+    {"bnstruct_dvbn_discretize_all", (DL_FUNC)&bnstruct_dvbn_discretize_all, 11},
+    {NULL, NULL, 0}};
 
 void R_init_bnstruct(DllInfo *dll)
 {
     R_registerRoutines(dll, NULL, CallEntries, NULL, NULL);
     R_useDynamicSymbols(dll, FALSE);
 }
-

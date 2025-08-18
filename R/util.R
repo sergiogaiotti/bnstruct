@@ -312,11 +312,11 @@ identify.subgraphs <- function(am) {
 
 apply_discretization <- function(data, discretization_policy){
   for (i in 1:ncol(data)){
-    if ( length(discretization_policy[i]) == 0) {
+    if ( is.na(discretization_policy[[i]] )) {
       next  # skip if no discretization policy for this column
     }
     
-    data[,i] <- as.matrix(cut(data[,i], discretization_policy[i], labels = FALSE, include.lowest = TRUE), nr,1)
+    data[,i] <- as.matrix(cut(data[,i], c(min(data[,i]), discretization_policy[i], max(data[,i])), labels = FALSE, include.lowest = TRUE), nr,1)
   }
   return(data)
 }
@@ -351,5 +351,21 @@ detect_affected_continuous_vars <- function(old.g, new.g, cont.nodes) {
   }
   
   affected
+}
+
+adj_to_parents_children <- function(adj) {
+  # Return parents and children lists for a given adjacency matrix
+  stopifnot(is.matrix(adj), nrow(adj) == ncol(adj))
+  n <- ncol(adj)
+  
+  parents  <- vector("list", n)
+  children <- vector("list", n)
+  
+  for (j in seq_len(n)) {
+    parents[[j]]  <- which(adj[, j] != 0L)
+    children[[j]] <- which(adj[j, ] != 0L)
+  }
+  
+  list(parents = parents, children = children)
 }
 

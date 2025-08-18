@@ -475,17 +475,18 @@ g2 <- function( data, sizes, x, y, chi.th = 0.05, z=c(), min.counts = 5)
 hc_w_disc <- function( data, node.sizes, scoring.func = 0, cpc, cont.nodes = c(), ess = 1, tabu.tenure = 100, 
                 max.parents = length(node.sizes)-1,
                 init.net = NULL, wm.max=15, layering=NULL, layer.struct=NULL,
-                mandatory.edges = NULL )
+                mandatory.edges = NULL , max.disc_cycles = 10, approx_parents = 0)
 {
   n.nodes <- ncol(data)
   n.cases <- nrow(data)
 
   # just to be sure
   storage.mode( node.sizes ) <- "integer"
-  
+  storage.mode( approx_parents ) <- "integer"
+  storage.mode( max.disc_cycles ) <- "integer"
   # store original data
   oiginal.data <- data
-
+  
   # quantize data of continuous nodes 
   levels <- rep( 0, n.nodes )
   levels[cont.nodes] <- node.sizes[cont.nodes]
@@ -497,7 +498,8 @@ hc_w_disc <- function( data, node.sizes, scoring.func = 0, cpc, cont.nodes = c()
   curr.discretization <- out.data$quantiles
   # quantiles(bn) <- out.data$quantiles
   # quantiles(dataset) <- out.data$quantiles
-
+  storage.mode(data) <- "integer"
+  storage.mode(original.data) <- "double"
   # apply mandatory edges (if present)
   m.edges <- matrix(0L, n.nodes, n.nodes)
   if (!is.null(mandatory.edges)) {
@@ -548,6 +550,12 @@ hc_w_disc <- function( data, node.sizes, scoring.func = 0, cpc, cont.nodes = c()
   }
   # end apply layering
   
+  # parents and children lists
+  out.par_child <- adj_to_parents_children( curr.g )
+  curr.parents <- out.par_child$parents
+  curr.children <- out.par_child$children
+  rm(out.par_child)
+
   curr.score.nodes <- array(0,n.nodes)
   for( i in 1L:n.nodes )
     curr.score.nodes[i] <- .Call( "bnstruct_score_node", data, node.sizes, i-1L, which(curr.g[,i]!=0)-1L,
@@ -635,13 +643,27 @@ hc_w_disc <- function( data, node.sizes, scoring.func = 0, cpc, cont.nodes = c()
     # no possible improvements given the tabu list
     if( next.score.diff[best.node] == -Inf )
       break
+
     # save old graph
     old.g <- curr.g
+
     # update current graph and scores
     curr.g[next.pert[best.node],best.node] = 1L - curr.g[next.pert[best.node],best.node] # flip
+    if (curr.g[next.pert[best.node], best.node] == 1L)
+    {
+      curr.parents[[best.node]] <- c(curr.parents[[best.node]], next.pert[best.node])
+      curr.children[[next.pert[best.node]]] <- c(curr.children[[next.pert[best.node]]], best.node)
+    }
+    else
+    {
+      curr.parents[[best.node]] <- setdiff(curr.parents[[best.node]], next.pert[best.node])
+      curr.children[[next.pert[best.node]]] <- setdiff(curr.children[[next.pert[best.node]]], best.node)
+    }
     if( curr.g[best.node,next.pert[best.node]] == 1L) # need to reverse
     {
       curr.g[best.node,next.pert[best.node]] = 0L;
+      curr.parents[[next.pert[best.node]]] <- setdiff(curr.parents[[next.pert[best.node]]], best.node)
+      curr.children[[best.node]] <- setdiff(curr.children[[best.node]], next.pert[best.node])
       # cat(node.sizes,'\t',best.node-1L,'\t',which(curr.g[,best.node]!=0)-1L,'\t',next.pert[best.node]-1L,'\t',which(curr.g[,next.pert[best.node]]!=0)-1L,'\n')
       curr.score.nodes[best.node] <- .Call( "bnstruct_score_node", data, node.sizes, best.node-1L, 
                                             which(curr.g[,best.node]!=0)-1L, scoring.func, ess, PACKAGE = "bnstruct" )
@@ -653,15 +675,18 @@ hc_w_disc <- function( data, node.sizes, scoring.func = 0, cpc, cont.nodes = c()
     
     # detect continuous nodes affected by the perturbation and run discretization routine
     affected <- detect_affected_continuous_vars(old.g, curr.g, cont.nodes)
-
-    if (length(affected)>0)
+    n.cont_affected <- length(affected)
+    if (n.cont_affected>0)
     {
-      data[, affected] <- original.data[, affected]
-      out.disc <- 1#TODO: call to C implementation
-      
-      curr.discretization <- out.disc$disc_edges
+      top_order <- topological.sort(curr.g)
+      affected_order <- rev(top_order[top_order %in% affected])
+
+      out.disc <- .Call("bnstruct_dvbn_discretize_all", original.data[,affected_order], data, n.nodes, n.cases, n.cont_affected, affected_order-1L, node.sizes, curr.parents, curr.children, 
+                        max.disc_cycles, approx_parents, PACKAGE = "bnstruct")
+      curr.discretization <- rep(list(NA), n.nodes)
+      curr.discretization[affected_order] <- out.disc
       data <- apply_discretization(data, curr.discretization)
-      node.sizes[affected] <- lapply(curr.discretization[affected], length) - 1
+      node.sizes[affected] <- lapply(curr.discretization[affected], length) + 1
 
       # recalculate scores for affected nodes
       for (i in affected) 
