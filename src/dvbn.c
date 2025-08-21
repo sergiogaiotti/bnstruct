@@ -182,6 +182,20 @@ static double *interval_table_single_cat(const int *col_sorted, int n)
 {
     int *uniq = NULL, K = 0, *id = NULL;
     compress_to_ids(col_sorted, n, &uniq, &K, &id);
+    // // Print unique values and their ids for debugging
+    // for (int i = 0; i < K; ++i)
+    //     printf("uniq[%d] = %d  ", i, uniq[i]);
+    // // also print the n ids one by one separated by a space
+    // printf("\nids: ");
+    // for (int i = 0; i < n; ++i)
+    //     printf("%d ", id[i]);
+    // printf("\n");
+    // End of debug print
+    // Debug print first 10 values of joint_sorted
+    // printf("joint_sorted before build: ");
+    // for (int i = 0; i < 20 && i < n; ++i)
+    //     printf("%d ", col_sorted[i]);
+    // printf("\n");
     free(uniq);
 
     /* prefix counts per class */
@@ -210,11 +224,26 @@ static double *interval_table_single_cat(const int *col_sorted, int n)
             for (int k = 0; k < K; ++k)
             {
                 int cnt = pref[k][j + 1] - pref[k][i];
+                // if (i == 0 && j == 3)
+                //     printf("cnt i: %d j: %d k: %d cnt: %d\n", i, j, k, cnt);
                 v -= lgammafn((double)cnt + 1.0);
             }
             tbl[(size_t)i * (size_t)n + (size_t)j] = v;
         }
     }
+    // // Debug print tbl in upper triangular form with nice formatting
+    // int i = 0;
+    // printf("tab_parents_contrib: \n");
+    // for (int j = i; j < 20; ++j)
+    // {
+    //     if (j == i)
+    //         printf("%10.4f ", tbl[(size_t)i * (size_t)n + (size_t)j]);
+    //     else
+    //         printf("%10.4f ", tbl[(size_t)i * (size_t)n + (size_t)j]);
+    // }
+    // printf("\n");
+
+    // // End of debug print
     for (int k = 0; k < K; ++k)
         free(pref[k]);
     free(pref);
@@ -307,27 +336,23 @@ static double *interval_table_parents(const int *P_sorted, int n, int approx, in
     return interval_table_single_cat(P_sorted, n);
 }
 
-/* Build joint-coded parent column over sorted order (exact mode). NA in any parent -> NA code. */
+/* Build joint-coded parent column over sorted order (exact mode). */
 static void build_joint_parents_sorted(const int *D, int n_cases, const int *order,
                                        const int *pa_idx, int n_pa, int *out_joint)
 {
     for (int t = 0; t < n_cases; ++t)
     {
         int r = order[t];
+
         unsigned int h = 2166136261u;
-        int any_na = 0;
         for (int p = 0; p < n_pa; ++p)
         {
+
             int v = get_disc(D, n_cases, pa_idx[p], r);
-            if (is_na_int(v))
-            {
-                any_na = 1;
-                break;
-            }
             h ^= (unsigned int)v;
             h *= 16777619u;
         }
-        out_joint[t] = any_na ? NA_INTEGER : (int)(h & 0x7fffffff);
+        out_joint[t] = (int)(h & 0x7fffffff);
     }
 }
 
@@ -367,11 +392,22 @@ static double *build_Hfull(const double *X, const int *D,
         else
         {
             int *joint_sorted = (int *)xmalloc(sizeof(int) * (size_t)n);
+
             build_joint_parents_sorted(D, n_cases, order, pa_idx, n_pa, joint_sorted);
             double *T = interval_table_parents(joint_sorted, n, 0, n_pa);
+            // printf("Hfull parents contribution: \n");
             for (int i = 0; i < n; ++i)
+            {
                 for (int j = i; j < n; ++j)
+                {
                     H[(size_t)i * (size_t)n + (size_t)j] += T[(size_t)i * (size_t)n + (size_t)j];
+                    // // Debug print H if i==0 and j<20
+                    // if (i == 0 && j < 20)
+                    // {
+                    //     printf("%f, ", H[(size_t)i * (size_t)n + (size_t)j]);
+                    // }
+                }
+            }
             free(T);
             free(joint_sorted);
         }
@@ -409,11 +445,7 @@ static double *build_Hfull(const double *X, const int *D,
                     if (sidx == target)
                         continue; /* exclude the target itself */
                     int v = get_disc(D, n_cases, sidx, r);
-                    if (is_na_int(v))
-                    {
-                        any_na = 1;
-                        break;
-                    }
+
                     h ^= (unsigned int)v;
                     h *= 16777619u;
                     used = 1;
@@ -423,17 +455,45 @@ static double *build_Hfull(const double *X, const int *D,
                     sp_sorted[t] = 0;
                 }
                 else
-                    sp_sorted[t] = any_na ? NA_INTEGER : (int)(h & 0x7fffffff);
+                    sp_sorted[t] = (int)(h & 0x7fffffff);
             }
         }
 
         double *T = interval_table_child_spouse(child_sorted, sp_sorted, n);
+        // Debug print T child-spouse contribution
+        // printf("Hfull child-spouse contribution: \n");
+        // int i = 0;
+
+        // for (int j = i; j < 20; ++j)
+        // {
+        //     printf("%10.4f ", T[(size_t)i * (size_t)n + (size_t)j]);
+        // }
+        // printf("\n");
+
+        // End of debug print
         for (int i = 0; i < n; ++i)
             for (int j = i; j < n; ++j)
                 H[(size_t)i * (size_t)n + (size_t)j] += T[(size_t)i * (size_t)n + (size_t)j];
         free(T);
         free(child_sorted);
         free(sp_sorted);
+    }
+
+    //  Add -log(p_class_distribution_for_parent)
+    int parent_size = 1;
+    if (n_pa > 0)
+    {
+        for (int pi = 0; pi < n_pa; ++pi)
+        {
+            parent_size *= ns[pa_idx[pi]];
+        }
+    }
+    for (int i = 0; i < n; ++i)
+    {
+        for (int j = i; j < n; ++j)
+        {
+            H[(size_t)i * (size_t)n + (size_t)j] += lgammafn(j - i + (double)parent_size + 1.0) - lgammafn(j - i + 2.0) - lgammafn((double)parent_size);
+        }
     }
 
     return H;
@@ -453,6 +513,173 @@ static double *map_to_blocks(const double *Hfull, int n, const int *tails, int m
         }
     }
     return Hb;
+}
+/* DP -> cuts (midpoints), excluding min/max, using full H matrix */
+static void dp_and_edges_fullH(const double *Hfull, int n_cases,
+                               const double *X, int col, const int *order,
+                               const double *split, int lambda,
+                               double **cuts_out, int *n_cuts_out)
+{
+    // Step 1: identify heads and tails
+    int *heads = (int *)xmalloc(sizeof(int) * (size_t)n_cases);
+    int *tails = (int *)xmalloc(sizeof(int) * (size_t)n_cases);
+    int n_heads = 0, n_tails = 0;
+
+    heads[n_heads++] = 0;
+    for (int i = 1; i < n_cases; ++i)
+    {
+        double prev = get_cont(X, n_cases, col, order[i - 1]);
+        double cur = get_cont(X, n_cases, col, order[i]);
+        if (cur != prev)
+        {
+            heads[n_heads++] = i;
+        }
+    }
+    // // debug print first 40 heads
+    // if (col == 0)
+    //     for (int i = 0; i < n_heads && i < 40; ++i)
+    //     {
+    //         printf("head[%d] = %d (value: %f)\n", i, heads[i], get_cont(X, n_cases, col, order[heads[i]]));
+    //     }
+    tails[n_tails++] = n_cases - 1;
+    for (int i = n_cases - 2; i >= 0; --i)
+    {
+        double next = get_cont(X, n_cases, col, order[i + 1]);
+        double cur = get_cont(X, n_cases, col, order[i]);
+        if (cur != next)
+        {
+            tails[n_tails++] = i;
+        }
+    }
+    // tails are collected backwards, reverse them
+    for (int i = 0; i < n_tails / 2; ++i)
+    {
+        int tmp = tails[i];
+        tails[i] = tails[n_tails - 1 - i];
+        tails[n_tails - 1 - i] = tmp;
+    }
+    // // debug print first 40 tails
+    // if (col == 0)
+    //     for (int i = 0; i < n_tails && i < 40; ++i)
+    //     {
+    //         printf("tail[%d] = %d (value: %f)\n", i, tails[i], get_cont(X, n_cases, col, order[tails[i]]));
+    //     }
+
+    double xmin = get_cont(X, n_cases, col, order[0]);
+    double xmax = get_cont(X, n_cases, col, order[n_cases - 1]);
+    double span = (xmax > xmin) ? (xmax - xmin) : 1.0;
+    // if (col == 0)
+    // {
+    //     // Debug print xmin, xmax, span
+    //     printf("col: %d, xmin: %f, xmax: %f, span: %f\n", col, xmin, xmax, span);
+    //     // ALSO print first 20 values of Hfull in the first row
+    //     printf("Hfull first row: ");
+    //     for (int i = 0; i < 20 && i < n_cases; ++i)
+    //     {
+    //         printf("%4.4f ", Hfull[0 * (size_t)n_cases + i]);
+    //     }
+    //     printf("\n");
+    //     // Also fitst 20 values of split
+    //     printf("split: ");
+    //     for (int i = 0; i < 20 && i < n_cases; ++i)
+    //     {
+    //         printf("%4.4f ", split[i]);
+    //     }
+    // }
+
+    // Step 2: DP arrays
+    double *best = (double *)xmalloc(sizeof(double) * (size_t)n_tails);
+    int **choice = (int **)xcalloc((size_t)n_tails, sizeof(int *));
+    int *clen = (int *)xcalloc((size_t)n_tails, sizeof(int));
+
+    for (int a = 0; a < n_tails; ++a)
+    {
+        int tail_a = tails[a];
+        if (a == 0)
+        {
+            best[0] = -log(split[tail_a]) + Hfull[0 * (size_t)n_cases + tail_a];
+            choice[0] = (int *)xmalloc(sizeof(int));
+            choice[0][0] = tail_a;
+            clen[0] = 1;
+            // Debug print here
+            // if (col == 0)
+            // {
+            //     printf("H: %f, split: %f, tail_a: %d, best[0]: %f, choice[0][0]: %d\n", Hfull[0 * (size_t)n_cases + tail_a], split[tail_a], tail_a, best[0], choice[0][0]);
+            // }
+        }
+        else
+        {
+            double bv = INFINITY;
+            int *bs = NULL;
+            int bl = 0;
+            for (int b = 0; b <= a; ++b)
+            {
+                double val;
+                if (b == a)
+                {
+                    double frac = (get_cont(X, n_cases, col, order[tail_a]) - xmin) / span;
+                    val = frac * (double)lambda - log(split[tail_a]) + Hfull[0 * (size_t)n_cases + tail_a];
+                }
+                else
+                {
+                    int head_next = heads[b + 1];
+                    double frac = (get_cont(X, n_cases, col, order[tail_a]) -
+                                   get_cont(X, n_cases, col, order[head_next])) /
+                                  span;
+                    val = best[b] + frac * (double)lambda - log(split[tail_a]) + Hfull[(size_t)head_next * (size_t)n_cases + tail_a];
+                }
+                if (val < bv)
+                {
+                    bv = val;
+                    if (bs)
+                        free(bs);
+                    if (b == a)
+                    {
+                        bs = (int *)xmalloc(sizeof(int));
+                        bs[0] = tail_a;
+                        bl = 1;
+                    }
+                    else
+                    {
+                        bl = clen[b] + 1;
+                        bs = (int *)xmalloc(sizeof(int) * (size_t)bl);
+                        memcpy(bs, choice[b], sizeof(int) * (size_t)clen[b]);
+                        bs[bl - 1] = tail_a;
+                    }
+                }
+            }
+            best[a] = bv;
+            choice[a] = bs;
+            clen[a] = bl;
+        }
+    }
+
+    int K = clen[n_tails - 1]; /* number of bins */
+    int ncuts = (K > 1) ? (K - 1) : 0;
+    double *cuts = NULL;
+    if (ncuts > 0)
+    {
+        cuts = (double *)xmalloc(sizeof(double) * (size_t)ncuts);
+        for (int i = 0; i < ncuts; ++i)
+        {
+            int t = choice[n_tails - 1][i];
+            double a_val = get_cont(X, n_cases, col, order[t]);
+            double b_val = get_cont(X, n_cases, col, order[t + 1]);
+            cuts[i] = 0.5 * (a_val + b_val);
+        }
+    }
+
+    for (int i = 0; i < n_tails; ++i)
+        if (choice[i])
+            free(choice[i]);
+    free(choice);
+    free(clen);
+    free(best);
+    free(heads);
+    free(tails);
+
+    *cuts_out = cuts;
+    *n_cuts_out = ncuts;
 }
 
 /* DP -> cuts (midpoints), excluding min/max */
@@ -575,19 +802,32 @@ static void algo1_discretize_core(const double *X, const int *D,
     *n_cuts_out = 0;
 
     int *order = argsort_col(X, n_cases, cont_col);
-    int m = 0;
-    int *tails = build_tails(X, n_cases, cont_col, order, &m);
-    if (m == 0)
-    {
-        free(order);
-        free(tails);
-        return;
-    }
+    // print the order for debugging
+    // printf("order for column %d: ", cont_col);
+    // for (int i = 0; i < 20; ++i)
+    //     printf("%d ", order[i]);
+    // printf("\n");
+    // int m = 0;
+    // int *tails = build_tails(X, n_cases, cont_col, order, &m);
+    // if (m == 0)
+    // {
+    //     free(order);
+    //     free(tails);
+    //     return;
+    // }
 
     SEXP pa_s = VECTOR_ELT(parents_list, target);
     int n_pa = LENGTH(pa_s);
     const int *pa_idx = (n_pa > 0) ? INTEGER(pa_s) : NULL;
-
+    // Debug print of pa_idx
+    // printf("parents_list of varcont[%d] and target[%d]: ", cont_col, target);
+    // {
+    //     for (int i = 0; i < n_pa; ++i)
+    //         printf("%d ", pa_idx[i]);
+    // }
+    // printf("\n");
+    // printf("Value of the parent of target at row 10: %d ", get_disc(D, n_cases, 3, 10));
+    // End of debug print
     SEXP ch_s = VECTOR_ELT(children_list, target);
     int n_ch = LENGTH(ch_s);
     const int *children = (n_ch > 0) ? INTEGER(ch_s) : NULL;
@@ -595,20 +835,61 @@ static void algo1_discretize_core(const double *X, const int *D,
     double *Hfull = build_Hfull(X, D, n_nodes, n_cases, target, order, ns,
                                 pa_idx, n_pa, children, n_ch,
                                 parents_list, approx_parents);
-    double *Hb = map_to_blocks(Hfull, n_cases, tails, m);
+    // double *Hb = map_to_blocks(Hfull, n_cases, tails, m);
 
     int lambda = max_card(ns, n_nodes);
     double *split = compute_split_prior(X, n_cases, cont_col, order, lambda);
 
+    // Debugging output
+    // printf("Discretizing column %d (target=%d) with %d cases, %d parents, %d children\n",
+    //        cont_col, target, n_cases, n_pa, n_ch);
+    // printf("Hfull size: %d x %d\n", n_cases, n_cases);
+    // printf("Hfull (first %d): ", 100);
+    // for (int i = 0; i < n_cases * n_cases && i < 100; ++i)
+    // {
+    //     printf("%.8f", Hfull[i]);
+    //     if (i < n_cases * n_cases - 1 && i < 99)
+    //         printf(", ");
+    // }
+    // printf("\n");
+    // printf("split: ");
+    // for (int i = 0; i < n_cases; ++i)
+    //     printf("%.8f ", split[i]);
+    // printf("\n");
+    // SEXP pa_s_dbg = VECTOR_ELT(parents_list, target);
+    // int n_pa_dbg = LENGTH(pa_s_dbg);
+    // printf("parents_list[%d]: ", target);
+    // if (n_pa_dbg > 0)
+    // {
+    //     const int *pa_idx_dbg = INTEGER(pa_s_dbg);
+    //     for (int i = 0; i < n_pa_dbg; ++i)
+    //         printf("%d ", pa_idx_dbg[i]);
+    // }
+    // printf("\n");
+
+    // SEXP ch_s_dbg = VECTOR_ELT(children_list, target);
+    // int n_ch_dbg = LENGTH(ch_s_dbg);
+    // printf("children_list[%d]: ", target);
+    // if (n_ch_dbg > 0)
+    // {
+    //     const int *ch_idx_dbg = INTEGER(ch_s_dbg);
+    //     for (int i = 0; i < n_ch_dbg; ++i)
+    //         printf("%d ", ch_idx_dbg[i]);
+    // }
+    // printf("\n");
+
+    // end of debugging output
+
     double *cuts = NULL;
     int ncuts = 0;
-    dp_and_edges(Hb, m, X, n_cases, cont_col, order, tails, split, lambda, &cuts, &ncuts);
-
+    // Try to change the dp_and_edges call to dp_and_edges_fullH
+    // dp_and_edges(Hb, m, X, n_cases, cont_col, order, tails, split, lambda, &cuts, &ncuts);
+    dp_and_edges_fullH(Hfull, n_cases, X, cont_col, order, split, lambda, &cuts, &ncuts);
     free(Hfull);
-    free(Hb);
+    // free(Hb);
     free(split);
     free(order);
-    free(tails);
+    // free(tails);
     *cuts_out = cuts;
     *n_cuts_out = ncuts;
 }
@@ -709,13 +990,17 @@ SEXP bnstruct_dvbn_discretize_all(SEXP data_cont, SEXP data_disc,
     int n_cases_c = INTEGER(n_cases)[0];
     int n_cont_c = INTEGER(n_cont)[0];
     const int *cont_idx = INTEGER(cont_index);
-    const int *ns_c = INTEGER(ns);
+    int *ns_c = INTEGER(ns);
     int max_cycles = INTEGER(n_cycles)[0];
     int approx_c = INTEGER(approx_parents)[0];
 
     double **cuts = (double **)xcalloc((size_t)n_cont_c, sizeof(double *));
     int *ncuts = (int *)xcalloc((size_t)n_cont_c, sizeof(int));
 
+    // printf("ns_c: ");
+    // for (int i = 0; i < n_nodes_c; ++i)
+    //     printf("%d ", ns_c[i]);
+    // printf("\n");
     int changed = 1;
     int iter = 0;
     while (changed && iter < max_cycles)
@@ -724,15 +1009,51 @@ SEXP bnstruct_dvbn_discretize_all(SEXP data_cont, SEXP data_disc,
         for (int j = 0; j < n_cont_c; ++j)
         {
             int col_d = cont_idx[j];
+            int col_x = j; // position in X (data_cont)
+
+            // Check if this variable has parents or children
+            SEXP pa_s = VECTOR_ELT(parents_list, col_d);
+            int n_pa = LENGTH(pa_s);
+            SEXP ch_s = VECTOR_ELT(children_list, col_d);
+            int n_ch = LENGTH(ch_s);
 
             double *new_cuts = NULL;
             int new_n = 0;
-            algo1_discretize_core(X, D, n_nodes_c, n_cases_c, ns_c,
-                                  j, col_d,
-                                  parents_list, children_list,
-                                  approx_c,
-                                  &new_cuts, &new_n);
 
+            if (n_pa == 0 && n_ch == 0)
+            {
+                // === Equal-width fallback (like Julia) ===
+                int l_card = max_card(ns_c, n_nodes_c);
+                double minv = R_PosInf, maxv = R_NegInf;
+                for (int i = 0; i < n_cases_c; ++i)
+                {
+                    double v = get_cont(X, n_cases_c, col_x, i);
+                    if (v < minv)
+                        minv = v;
+                    if (v > maxv)
+                        maxv = v;
+                }
+                new_n = l_card - 1; // number of cuts
+                if (new_n > 0)
+                {
+                    new_cuts = (double *)xcalloc((size_t)new_n, sizeof(double));
+                    for (int k = 1; k < l_card; ++k)
+                    {
+                        new_cuts[k - 1] = minv + (maxv - minv) * ((double)k / (double)l_card);
+                    }
+                }
+            }
+            else
+            {
+
+                algo1_discretize_core(X, D, n_nodes_c, n_cases_c, ns_c,
+                                      j, col_d,
+                                      parents_list, children_list,
+                                      approx_c,
+                                      &new_cuts, &new_n);
+                printf("iter %d col_d=%d ns=%d lambda=%d ncuts=%d\n",
+                       iter, col_d, ns_c[col_d], max_card(ns_c, n_nodes_c), new_n);
+            }
             if (!cuts_equal(cuts[j], ncuts[j], new_cuts, new_n))
             {
                 if (cuts[j])
@@ -743,6 +1064,8 @@ SEXP bnstruct_dvbn_discretize_all(SEXP data_cont, SEXP data_disc,
 
                 // Discretize the column in data_disc
                 discretize_column(X, D, n_cases_c, j, col_d, new_cuts, new_n);
+                // Update node size for that column
+                ns_c[col_d] = new_n + 1; // +1 because cuts define bins, not categories
             }
             else
             {
