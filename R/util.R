@@ -312,12 +312,13 @@ identify.subgraphs <- function(am) {
 
 apply_discretization <- function(data, discretization_policy){
   for (i in 1:ncol(data)){
-    if ( is.na(discretization_policy[[i]] )) {
+    if ( any(is.na(discretization_policy[[i]]))) {
       next  # skip if no discretization policy for this column
     }
     
-    data[,i] <- as.matrix(cut(data[,i], c(min(data[,i]), discretization_policy[i], max(data[,i])), labels = FALSE, include.lowest = TRUE), nr,1)
+    data[,i] <- as.matrix(cut(data[,i], unique(c(min(data[,i]), discretization_policy[[i]], max(data[,i]))), labels = FALSE, include.lowest = TRUE), nr,1)
   }
+  storage.mode(data) <- "integer"
   return(data)
 }
 

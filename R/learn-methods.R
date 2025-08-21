@@ -57,11 +57,9 @@ setMethod("learn.network",
                                     bootstrap, layering, max.fanin, max.fanin.layers, max.parents,
                                     max.parents.layers, layer.struct, cont.nodes, use.imputed.data,
                                     use.cpc, mandatory.edges, ...)
-              
-              if (!bootstrap && algo != "mmpc")
+              if (!bootstrap && !(algo %in% c("mmpc","hc_disc")))
                 bn <- learn.params(bn, dataset, ess, use.imputed.data)
             }
-            
             return(bn)
           })
 
@@ -366,9 +364,9 @@ setMethod("learn.structure",
             scoring.func(bn) <- c("BDeu", "AIC", "BIC")[scoring.func + 1]
             
             algo <- tolower(algo)
-            if (!algo %in% c("sm", "mmhc", "sem", "mmpc", "hc")) {
+            if (!algo %in% c("sm", "mmhc", "sem", "mmpc", "hc", "hc_disc")) {
               bnstruct.log("structure learning algorithm not recognized, using MMHC")
-              bnstruct.log("(available options are: SM, MMHC, MMPC, HC, SEM)")
+              bnstruct.log("(available options are: SM, MMHC, MMPC, HC, SEM, HC_DISC)")
               algo <- "mmhc"
             }
             
@@ -568,6 +566,72 @@ setMethod("learn.structure",
               }
               bnstruct.end.log("learning using HC completed.")
             } # end if algo == hc
+            if (algo == "hc_disc")
+            {
+              if ("max.disc_cycles" %in% names(other.args)){
+                max.disc_cycles <- other.args$max.disc_cycles
+              }
+              else{
+                max.disc_cycles <- 10
+              }
+              if("approx.parents" %in% names(other.args)){
+                approx.parents <- other.args$approx.parents
+              }
+              else{
+                approx.parents <- 0L
+              }
+              if ( max.parents < max.fanin                                   ||
+                   (is.null(layer.struct) && !is.null(max.parents.layers))  ) {
+                bnstruct.log ("HC uses 'max.fanin' and 'layer.struct' parameters, ",
+                              "but apparently you set 'max.parents' and 'max.parents.layers', ",
+                              "changing accordingly.")
+                max.parents <- max.fanin
+                max.parents.layers <- max.fanin.layers
+              }
+              bnstruct.start.log("learning the structure using HC_DISC ...")
+              
+              if (!is.null(init.net))
+                in.dag <- dag(init.net)
+              else
+                in.dag <- NULL
+              
+              if (bootstrap)
+              {
+                finalPDAG <- matrix(0,num.nodes,num.nodes)
+                for( i in seq_len(num.boots(dataset)) )
+                {
+                  data <- boot(dataset, i, use.imputed.data=use.imputed.data)
+                  cpc <- matrix(rep(1, num.nodes*num.nodes), nrow = num.nodes, ncol = num.nodes)
+                  out.hc <- hc_w_disc( data, node.sizes, scoring.func, cpc, cont.nodes, ess = ess,
+                             tabu.tenure = tabu.tenure, max.parents = max.parents, init.net = in.dag,
+                             wm.max=wm.max, layering=layering, layer.struct=layer.struct,
+                             mandatory.edges = mandatory.edges, max.disc_cycles, approx.parents)
+                  dag <- out.hc$dag
+                  finalPDAG <- finalPDAG + dag.to.cpdag( dag, layering, layer.struct )
+                }
+                wpdag(bn) <- finalPDAG
+              }
+              else
+              {
+                if (is.null(initial.cpc)) {
+                  cpc <- matrix(rep(1, num.nodes*num.nodes), nrow = num.nodes, ncol = num.nodes)
+                } else {
+                  cpc <- initial.cpc
+                }
+                out.hc <- hc_w_disc( data, node.sizes, scoring.func, cpc, cont.nodes, ess = ess,
+                               tabu.tenure = tabu.tenure, max.parents = max.parents, init.net = in.dag,
+                               wm.max=wm.max, layering=layering, layer.struct=layer.struct,
+                               mandatory.edges = mandatory.edges,max.disc_cycles, approx.parents)
+                dag(bn) <- out.hc$dag
+                discr <- out.hc$discretization
+                node.sizes(bn)[continuous_index] <- sapply(discr[continuous_index],function(x)length(x)+1L)
+                quantiles(bn) <- as.list(node.sizes(bn))
+                for (i in continuous_index){
+                  quantiles(bn)[[i]] <- c(min(data[,i]),discr[[i]],max(data[,i]))
+                }
+              }
+              bnstruct.end.log("learning using HC completed.")
+            } # end if algo == hc_disc
             
             if (algo == "mmhc") # default
             {
