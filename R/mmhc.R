@@ -489,12 +489,6 @@ hc_w_disc <- function(data, node.sizes, scoring.func = 0, cpc, cont.nodes = c(),
   # browser()
   n.nodes <- ncol(data)
   n.cases <- nrow(data)
-  print("n.nodes:")
-  print(n.nodes)
-  print("data")
-  print(data)
-  print("cont.nodes")
-  print(cont.nodes)
   # just to be sure
   storage.mode(node.sizes) <- "integer"
   storage.mode(approx_parents) <- "integer"
@@ -502,17 +496,17 @@ hc_w_disc <- function(data, node.sizes, scoring.func = 0, cpc, cont.nodes = c(),
   storage.mode(cont.nodes) <- "integer"
   # store original data
   original.data <- data
-  
+
   # quantize data of continuous nodes
   levels <- rep(0, n.nodes)
   levels[cont.nodes] <- node.sizes[cont.nodes]
 
   # data <- quantize.with.na.matrix( data, levels )
   # data <- quantize.matrix( data, levels )
-  curr.discretization <- rep(list(NA),n.nodes)
+  curr.discretization <- rep(list(NA), n.nodes)
   out.data <- quantize.matrix(data, levels)
   data <- out.data$quant
-  curr.discretization[cont.nodes] <- lapply(out.data$quantiles[cont.nodes], function(x)x[2:(length(x)-1)])
+  curr.discretization[cont.nodes] <- lapply(out.data$quantiles[cont.nodes], function(x) x[2:(length(x) - 1)])
   # quantiles(bn) <- out.data$quantiles
   # quantiles(dataset) <- out.data$quantiles
   storage.mode(data) <- "integer"
@@ -567,7 +561,7 @@ hc_w_disc <- function(data, node.sizes, scoring.func = 0, cpc, cont.nodes = c(),
   # end apply layering
 
   # parents and children lists
-  
+
   out.par_child <- adj_to_parents_children(curr.g)
   curr.parents <- out.par_child$parents
   curr.children <- out.par_child$children
@@ -702,12 +696,12 @@ hc_w_disc <- function(data, node.sizes, scoring.func = 0, cpc, cont.nodes = c(),
       top_order <- topological.sort(curr.g)
       affected_order <- as.integer(rev(top_order[top_order %in% affected]))
 
-      out.disc <- .Call("bnstruct_dvbn_discretize_all", original.data[, affected_order,drop=F], data, n.nodes, n.cases, n.cont_affected, affected_order - 1L, node.sizes, lapply(curr.parents, function(x) as.integer(x - 1L)), lapply(curr.children, function(x) as.integer(x - 1L)),
+      out.disc <- .Call("bnstruct_dvbn_discretize_all", original.data[, affected_order, drop = F], data, n.nodes, n.cases, n.cont_affected, affected_order - 1L, node.sizes, lapply(curr.parents, function(x) as.integer(x - 1L)), lapply(curr.children, function(x) as.integer(x - 1L)),
         max.disc_cycles, approx_parents,
         PACKAGE = "bnstruct"
       )
       curr.discretization[affected_order] <- out.disc
-      data[,affected] <- apply_discretization(original.data[,affected,drop=F], curr.discretization[affected])
+      data[, affected] <- apply_discretization(original.data[, affected, drop = F], curr.discretization[affected])
       node.sizes[affected] <- sapply(curr.discretization[affected], length) + 1L
 
       # recalculate scores for affected nodes
@@ -745,6 +739,6 @@ hc_w_disc <- function(data, node.sizes, scoring.func = 0, cpc, cont.nodes = c(),
     tabu.pt <- (tabu.pt) %% tabu.tenure + 1
     # print(curr.g)
   }
-  
-  return(list(dag=global.best.g, discretization = curr.discretization))
+
+  return(list(dag = global.best.g, discretization = curr.discretization))
 }
