@@ -57,7 +57,7 @@ setMethod("learn.network",
                                     bootstrap, layering, max.fanin, max.fanin.layers, max.parents,
                                     max.parents.layers, layer.struct, cont.nodes, use.imputed.data,
                                     use.cpc, mandatory.edges, ...)
-              if (!bootstrap && !(algo %in% c("mmpc","hc_disc")))
+              if (!bootstrap && algo != "mmpc")
                 bn <- learn.params(bn, dataset, ess, use.imputed.data)
             }
             return(bn)
@@ -253,8 +253,10 @@ setMethod("learn.params",
 #             storage.mode(dag) <- "integer"
             storage.mode(node.sizes) <- "integer"
 
-            # quantize data of continuous nodes 
+            # quantize data of continuous nodes
             cont.nodes <- which(!discreteness(bn))
+            if (struct.algo(bn) != "hc_disc"){
+              
             levels <- rep( 0, n.nodes )
             levels[cont.nodes] <- node.sizes[cont.nodes]
             
@@ -263,6 +265,12 @@ setMethod("learn.params",
             data <- out.data$quant
             quantiles(bn) <- out.data$quantiles
             quantiles(dataset) <- out.data$quantiles
+            }
+            else{
+              quantiles(bn)[-cont.nodes] <- rep(list(NA),n.nodes-length(cont.nodes))
+              quantiles(dataset) <- quantiles(bn)
+              data <- apply_discretization(data, quantiles(bn))
+            }
 
             #n.nodes <- dataset@num.items #dim(data)[2]
             cpts <- list("list",n.nodes)
@@ -623,9 +631,10 @@ setMethod("learn.structure",
                                wm.max=wm.max, layering=layering, layer.struct=layer.struct,
                                mandatory.edges = mandatory.edges,max.disc_cycles, approx.parents)
                 dag(bn) <- out.hc$dag
+                # browser()
                 discr <- out.hc$discretization
                 node.sizes(bn)[continuous_index] <- sapply(discr[continuous_index],function(x)length(x)+1L)
-                quantiles(bn) <- as.list(node.sizes(bn))
+                quantiles(bn) <- rep(list(NA), num.nodes)
                 for (i in continuous_index){
                   quantiles(bn)[[i]] <- c(min(data[,i]),discr[[i]],max(data[,i]))
                 }
