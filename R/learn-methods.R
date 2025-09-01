@@ -620,6 +620,11 @@ setMethod(
       } else {
         approx.parents <- 0L
       }
+      if ("L_card" %in% names(other.args)) {
+        L_card <- as.integer(other.args$L_card)
+      } else {
+        L_card <- NULL
+      }
       if (max.parents < max.fanin ||
         (is.null(layer.struct) && !is.null(max.parents.layers))) {
         bnstruct.log(
@@ -648,7 +653,7 @@ setMethod(
             ess = ess,
             tabu.tenure = tabu.tenure, max.parents = max.parents, init.net = in.dag,
             wm.max = wm.max, layering = layering, layer.struct = layer.struct,
-            mandatory.edges = mandatory.edges, max.disc_cycles, approx.parents
+            mandatory.edges = mandatory.edges, L_card = L_card, max.disc_cycles = max.disc_cycles, approx_parents = approx.parents
           )
           dag <- out.hc$dag
           finalPDAG <- finalPDAG + dag.to.cpdag(dag, layering, layer.struct)
@@ -664,7 +669,7 @@ setMethod(
           ess = ess,
           tabu.tenure = tabu.tenure, max.parents = max.parents, init.net = in.dag,
           wm.max = wm.max, layering = layering, layer.struct = layer.struct,
-          mandatory.edges = mandatory.edges, max.disc_cycles, approx.parents
+          mandatory.edges = mandatory.edges, L_card = L_card, max.disc_cycles = max.disc_cycles, approx_parents = approx.parents
         )
         dag(bn) <- out.hc$dag
         # browser()

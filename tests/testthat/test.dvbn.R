@@ -74,6 +74,7 @@ storage.mode(cont_data_permutation) <- "integer"
 
 # Run discretization
 max_cycles <- 8L
+l_card <- -1L
 cuts <- .Call(
   "bnstruct_dvbn_discretize_all",
   data.cont, data.disc,
@@ -84,7 +85,8 @@ cuts <- .Call(
   as.integer(ns),
   parents_list, children_list,
   as.integer(max_cycles),
-  as.integer(0)
+  as.integer(0),
+  l_card
 )
 
 # Reorder cuts

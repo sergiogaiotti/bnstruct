@@ -101,6 +101,71 @@ static int max_card(const int *ns, int n_nodes)
             mx = ns[j];
     return mx;
 }
+/* Returns a malloc'ed array of Markov blanket variable indices (excluding target), and sets *mb_size_out */
+static int *markov_blanket(int n_nodes, SEXP parents_list, SEXP children_list, int target, int *mb_size_out)
+{
+    int *mb_flags = (int *)xcalloc((size_t)n_nodes, sizeof(int));
+    // Add parents of target
+    SEXP pa_s = VECTOR_ELT(parents_list, target);
+    int n_pa = LENGTH(pa_s);
+    if (n_pa > 0)
+    {
+        const int *pa_idx = INTEGER(pa_s);
+        for (int i = 0; i < n_pa; ++i)
+            if (pa_idx[i] != target)
+                mb_flags[pa_idx[i]] = 1;
+    }
+    // Add children of target
+    SEXP ch_s = VECTOR_ELT(children_list, target);
+    int n_ch = LENGTH(ch_s);
+    if (n_ch > 0)
+    {
+        const int *ch_idx = INTEGER(ch_s);
+        for (int i = 0; i < n_ch; ++i)
+            if (ch_idx[i] != target)
+                mb_flags[ch_idx[i]] = 1;
+        // Add co-parents of children (spouses)
+        for (int i = 0; i < n_ch; ++i)
+        {
+            int child = ch_idx[i];
+            SEXP child_pa_s = VECTOR_ELT(parents_list, child);
+            int n_child_pa = LENGTH(child_pa_s);
+            if (n_child_pa > 0)
+            {
+                const int *child_pa_idx = INTEGER(child_pa_s);
+                for (int j = 0; j < n_child_pa; ++j)
+                    if (child_pa_idx[j] != target)
+                        mb_flags[child_pa_idx[j]] = 1;
+            }
+        }
+    }
+    // Count and collect indices
+    int mb_size = 0;
+    for (int i = 0; i < n_nodes; ++i)
+        if (mb_flags[i] && i != target)
+            mb_size++;
+    int *mb = (int *)xmalloc(sizeof(int) * (size_t)mb_size);
+    int k = 0;
+    for (int i = 0; i < n_nodes; ++i)
+        if (mb_flags[i] && i != target)
+            mb[k++] = i;
+    free(mb_flags);
+    *mb_size_out = mb_size;
+    return mb;
+}
+
+/* Returns the maximum cardinality among the Markov blanket of target */
+static int max_card_mb(const int *ns, int n_nodes, SEXP parents_list, SEXP children_list, int target)
+{
+    int mb_size = 0;
+    int *mb = markov_blanket(n_nodes, parents_list, children_list, target, &mb_size);
+    int mx = 1;
+    for (int i = 0; i < mb_size; ++i)
+        if (ns[mb[i]] > mx)
+            mx = ns[mb[i]];
+    free(mb);
+    return mx;
+}
 
 /* split prior along sorted positions (last elem forced to 1) */
 static double *compute_split_prior(const double *X, int n_cases, int col, const int *order, int lambda)
@@ -795,7 +860,7 @@ static void algo1_discretize_core(const double *X, const int *D,
                                   int n_nodes, int n_cases, const int *ns,
                                   int cont_col, int target,
                                   SEXP parents_list, SEXP children_list,
-                                  int approx_parents,
+                                  int approx_parents, int lambda,
                                   double **cuts_out, int *n_cuts_out)
 {
     *cuts_out = NULL;
@@ -807,14 +872,15 @@ static void algo1_discretize_core(const double *X, const int *D,
     // for (int i = 0; i < 20; ++i)
     //     printf("%d ", order[i]);
     // printf("\n");
-    // int m = 0;
-    // int *tails = build_tails(X, n_cases, cont_col, order, &m);
-    // if (m == 0)
-    // {
-    //     free(order);
-    //     free(tails);
-    //     return;
-    // }
+    // end of debug print
+    int m = 0;
+    int *tails = build_tails(X, n_cases, cont_col, order, &m);
+    if (m == 0)
+    {
+        free(order);
+        free(tails);
+        return;
+    }
 
     SEXP pa_s = VECTOR_ELT(parents_list, target);
     int n_pa = LENGTH(pa_s);
@@ -835,9 +901,11 @@ static void algo1_discretize_core(const double *X, const int *D,
     double *Hfull = build_Hfull(X, D, n_nodes, n_cases, target, order, ns,
                                 pa_idx, n_pa, children, n_ch,
                                 parents_list, approx_parents);
-    // double *Hb = map_to_blocks(Hfull, n_cases, tails, m);
+    double *Hb = map_to_blocks(Hfull, n_cases, tails, m);
 
-    int lambda = max_card(ns, n_nodes);
+    if (lambda <= 0)
+        // lambda = max_card_mb(ns, n_nodes, parents_list, children_list, target);
+        lambda = max_card(ns, n_nodes);
     double *split = compute_split_prior(X, n_cases, cont_col, order, lambda);
 
     // Debugging output
@@ -883,13 +951,13 @@ static void algo1_discretize_core(const double *X, const int *D,
     double *cuts = NULL;
     int ncuts = 0;
     // Try to change the dp_and_edges call to dp_and_edges_fullH
-    // dp_and_edges(Hb, m, X, n_cases, cont_col, order, tails, split, lambda, &cuts, &ncuts);
-    dp_and_edges_fullH(Hfull, n_cases, X, cont_col, order, split, lambda, &cuts, &ncuts);
+    dp_and_edges(Hb, m, X, n_cases, cont_col, order, tails, split, lambda, &cuts, &ncuts);
+    // dp_and_edges_fullH(Hfull, n_cases, X, cont_col, order, split, lambda, &cuts, &ncuts);
     free(Hfull);
-    // free(Hb);
+    free(Hb);
     free(split);
     free(order);
-    // free(tails);
+    free(tails);
     *cuts_out = cuts;
     *n_cuts_out = ncuts;
 }
@@ -911,7 +979,7 @@ SEXP bnstruct_dvbn_discretize_one(SEXP data_cont, SEXP data_disc,
                                   SEXP n_nodes, SEXP n_cases,
                                   SEXP ns, SEXP cont_col, SEXP target,
                                   SEXP parents_list, SEXP children_list,
-                                  SEXP approx_parents)
+                                  SEXP approx_parents, SEXP l_card)
 {
     if (!isReal(data_cont) || !isInteger(data_disc))
         error("data_cont must be REAL matrix; data_disc must be INTEGER matrix.");
@@ -925,7 +993,8 @@ SEXP bnstruct_dvbn_discretize_one(SEXP data_cont, SEXP data_disc,
         error("parents_list and children_list must be lists.");
     if (!isInteger(approx_parents))
         error("approx_parents must be integer scalar.");
-
+    if (!isInteger(l_card))
+        error("l_card must be integer scalar.");
     const double *X = REAL(data_cont);
     const int *D = INTEGER(data_disc);
     int n_nodes_c = INTEGER(n_nodes)[0];
@@ -934,13 +1003,14 @@ SEXP bnstruct_dvbn_discretize_one(SEXP data_cont, SEXP data_disc,
     int cont_col_c = INTEGER(cont_col)[0];
     int target_c = INTEGER(target)[0];
     int approx_c = INTEGER(approx_parents)[0];
+    int lambda = INTEGER(l_card)[0];
 
     double *cuts = NULL;
     int ncuts = 0;
     algo1_discretize_core(X, D, n_nodes_c, n_cases_c, ns_c,
                           cont_col_c, target_c,
                           parents_list, children_list,
-                          approx_c,
+                          approx_c, lambda,
                           &cuts, &ncuts);
 
     SEXP out = PROTECT(allocVector(REALSXP, ncuts));
@@ -971,7 +1041,7 @@ SEXP bnstruct_dvbn_discretize_all(SEXP data_cont, SEXP data_disc,
                                   SEXP n_nodes, SEXP n_cases,
                                   SEXP n_cont, SEXP cont_index,
                                   SEXP ns, SEXP parents_list, SEXP children_list,
-                                  SEXP n_cycles, SEXP approx_parents)
+                                  SEXP n_cycles, SEXP approx_parents, SEXP l_card)
 {
     if (!isReal(data_cont) || !isInteger(data_disc))
         error("data_cont must be REAL matrix; data_disc must be INTEGER matrix.");
@@ -983,6 +1053,8 @@ SEXP bnstruct_dvbn_discretize_all(SEXP data_cont, SEXP data_disc,
         error("parents_list and children_list must be lists.");
     if (!isInteger(approx_parents))
         error("approx_parents must be integer scalar.");
+    if (!isInteger(l_card))
+        error("l_card must be integer scalar.");
 
     const double *X = REAL(data_cont);
     int *D = INTEGER(data_disc);
@@ -993,6 +1065,7 @@ SEXP bnstruct_dvbn_discretize_all(SEXP data_cont, SEXP data_disc,
     int *ns_c = INTEGER(ns);
     int max_cycles = INTEGER(n_cycles)[0];
     int approx_c = INTEGER(approx_parents)[0];
+    int lambda = INTEGER(l_card)[0];
 
     double **cuts = (double **)xcalloc((size_t)n_cont_c, sizeof(double *));
     int *ncuts = (int *)xcalloc((size_t)n_cont_c, sizeof(int));
@@ -1049,10 +1122,10 @@ SEXP bnstruct_dvbn_discretize_all(SEXP data_cont, SEXP data_disc,
                 algo1_discretize_core(X, D, n_nodes_c, n_cases_c, ns_c,
                                       j, col_d,
                                       parents_list, children_list,
-                                      approx_c,
+                                      approx_c, lambda,
                                       &new_cuts, &new_n);
                 printf("iter %d col_d=%d ns=%d lambda=%d ncuts=%d\n",
-                       iter, col_d, ns_c[col_d], max_card(ns_c, n_nodes_c), new_n);
+                       iter, col_d, ns_c[col_d], lambda, new_n);
             }
             if (!cuts_equal(cuts[j], ncuts[j], new_cuts, new_n))
             {
