@@ -8,3 +8,5 @@
 .Rbuildignore
 .RData
 bnstruct.Rproj
+.lintr
+test_disc_learn.R

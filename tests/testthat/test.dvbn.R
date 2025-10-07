@@ -60,7 +60,7 @@ graph[c(1, 5, 3), 7] <- 1L
 graph[3, 4] <- 1L
 graph[4, 6] <- 1L
 
-out.par_ch <- adj_to_parents_children(graph)
+out.par_ch <- bnstruct:::adj_to_parents_children(graph)
 parents_list <- out.par_ch$parents
 parents_list <- lapply(parents_list, function(x) as.integer(x - 1L))
 children_list <- out.par_ch$children
@@ -105,6 +105,10 @@ correct_cuts <- list(
   c(8.0, 12.35, 13.75, 16.05, 22.85, 24.8)
 )
 
+print("Cuts obtained from discretization:")
+print(cuts_ordered)
+print("Correct cuts:")
+print(correct_cuts)
 # Test that the cuts are correct
 test_that("Discretization cuts are correct", {
   expect_equal(cuts_ordered, correct_cuts)
