@@ -486,20 +486,7 @@ static void build_joint_parents_sorted(const int *D, int n_cases, const int *ord
     }
 }
 
-/* Simple hash table for memoization */
-typedef struct CacheEntry
-{
-    int i, j;
-    double score;
-    struct CacheEntry *next;
-} CacheEntry;
-
-typedef struct
-{
-    CacheEntry **buckets;
-    int size;
-    int hits, misses;
-} ScoreCache;
+/* Cache structures removed - showed 0% hit rate in practice */
 
 /* Optimized sparse scoring structure that avoids O(n²) memory */
 typedef struct
@@ -514,72 +501,9 @@ typedef struct
     const int *pa_idx;
     int parent_size;
     int approx_parents;
-    ScoreCache *cache; /* memoization cache */
 } SparseScorer;
 
-/* Cache management functions */
-static ScoreCache *create_cache(int cache_size)
-{
-    ScoreCache *cache = (ScoreCache *)xmalloc(sizeof(ScoreCache));
-    cache->size = cache_size;
-    cache->buckets = (CacheEntry **)xcalloc(cache_size, sizeof(CacheEntry *));
-    cache->hits = 0;
-    cache->misses = 0;
-    return cache;
-}
-
-static void free_cache(ScoreCache *cache)
-{
-    if (!cache)
-        return;
-    for (int i = 0; i < cache->size; i++)
-    {
-        CacheEntry *entry = cache->buckets[i];
-        while (entry)
-        {
-            CacheEntry *next = entry->next;
-            free(entry);
-            entry = next;
-        }
-    }
-    free(cache->buckets);
-    free(cache);
-}
-
-static inline int hash_pair(int i, int j, int size)
-{
-    return ((unsigned int)(i * 1009 + j * 1013)) % size;
-}
-
-static double cache_get(ScoreCache *cache, int i, int j, int *found)
-{
-    int hash = hash_pair(i, j, cache->size);
-    CacheEntry *entry = cache->buckets[hash];
-    while (entry)
-    {
-        if (entry->i == i && entry->j == j)
-        {
-            cache->hits++;
-            *found = 1;
-            return entry->score;
-        }
-        entry = entry->next;
-    }
-    cache->misses++;
-    *found = 0;
-    return 0.0;
-}
-
-static void cache_put(ScoreCache *cache, int i, int j, double score)
-{
-    int hash = hash_pair(i, j, cache->size);
-    CacheEntry *entry = (CacheEntry *)xmalloc(sizeof(CacheEntry));
-    entry->i = i;
-    entry->j = j;
-    entry->score = score;
-    entry->next = cache->buckets[hash];
-    cache->buckets[hash] = entry;
-}
+/* Cache management functions removed - cache showed 0% hit rate */
 
 static SparseScorer *create_sparse_scorer(const double *X, const int *D,
                                           int n_nodes, int n_cases, int target,
@@ -687,11 +611,6 @@ static SparseScorer *create_sparse_scorer(const double *X, const int *D,
         }
     }
 
-    /* Initialize memoization cache - size based on expected interval queries */
-    int cache_size = (n_cases < 1000) ? 1009 : (n_cases < 10000) ? 10007
-                                                                 : 50021;
-    ss->cache = create_cache(cache_size);
-
     return ss;
 }
 
@@ -723,35 +642,14 @@ static void free_sparse_scorer(SparseScorer *ss)
         free(ss->child_spouse_data);
     }
 
-    /* Print cache statistics for debugging */
-    if (ss->cache)
-    {
-        int total = ss->cache->hits + ss->cache->misses;
-        if (total > 0)
-        {
-            double hit_rate = (double)ss->cache->hits / total * 100.0;
-            printf("Cache stats: %d hits, %d misses (%.1f%% hit rate)\n",
-                   ss->cache->hits, ss->cache->misses, hit_rate);
-        }
-        free_cache(ss->cache);
-    }
-
     free(ss);
 }
 
-/* Compute interval score on-demand without storing full matrix */
+/* Compute interval score on-demand without caching */
 static double compute_sparse_score(SparseScorer *ss, int i, int j)
 {
     if (j < i)
         return INFINITY;
-
-    /* Check cache first */
-    int found = 0;
-    double cached_score = cache_get(ss->cache, i, j, &found);
-    if (found)
-    {
-        return cached_score;
-    }
 
     double score = 0.0;
 
@@ -779,9 +677,6 @@ static double compute_sparse_score(SparseScorer *ss, int i, int j)
 
     /* Prior term */
     score += lgammafn(j - i + (double)ss->parent_size + 1.0) - lgammafn(j - i + 2.0) - lgammafn((double)ss->parent_size);
-
-    /* Cache the result for future use */
-    cache_put(ss->cache, i, j, score);
 
     return score;
 }
