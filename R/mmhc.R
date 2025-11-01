@@ -583,7 +583,8 @@ hc_w_disc <- function(data, node.sizes, scoring.func = 0, cpc, cont.nodes = c(),
   # global best solution
   global.best.g <- curr.g
   global.best.score <- sum(curr.score.nodes)
-
+  global.best.discretization <- curr.discretization
+  
   # tabu list
   tabu <- array(0L, c(n.nodes, n.nodes, tabu.tenure))
   tabu.pt <- 1
@@ -735,6 +736,7 @@ hc_w_disc <- function(data, node.sizes, scoring.func = 0, cpc, cont.nodes = c(),
         wm.count <- 0
         global.best.g <- curr.g
         global.best.score <- sum(curr.score.nodes)
+        global.best.discretization <- curr.discretization
       } else {
       wm.count <- wm.count + 1
     }
@@ -745,5 +747,5 @@ hc_w_disc <- function(data, node.sizes, scoring.func = 0, cpc, cont.nodes = c(),
     # print(curr.g)
   }
 
-  return(list(dag = global.best.g, discretization = curr.discretization))
+  return(list(dag = global.best.g, discretization = global.best.discretization))
 }
