@@ -645,7 +645,7 @@ static void free_sparse_scorer(SparseScorer *ss)
     free(ss);
 }
 
-/* Compute interval score on-demand without caching */
+/* Compute interval score */
 static double compute_sparse_score(SparseScorer *ss, int i, int j)
 {
     if (j < i)
