@@ -917,6 +917,37 @@ dag.to.cpdag <- function(dag.adj.matrix, layering = NULL, layer.struct = NULL) {
   return(abs(label.edges(dag.adj.matrix, layering, layer.struct)))
 }
 
+#' convert a DAG to all equivalent DAGs
+#'
+#' Convert the adjacency matrix representing the DAG of a \code{\link{BN}}
+#' into a list of adjacency matrices representing all I-equivalent DAGs in the
+#' same Markov equivalence class.
+#'
+#' @name dag.to.all.equivalent.dags
+#' @rdname dag.to.all.equivalent.dags
+#'
+#' @param dag.adj.matrix the adjacency matrix representing the DAG of a \code{\link{BN}}.
+#' @param layering vector containing the layers where each node belongs.
+#' @param layer.struct \code{0/1} matrix for indicating which layers can contain parent nodes
+#'        for nodes in a layer (only for \code{mmhc}, \code{mmpc}).
+#'
+#' @return a list of adjacency matrices representing all I-equivalent DAGs in the same
+#'         Markov equivalence class as the input DAG.
+#'
+#' @seealso \code{\link{dag.to.cpdag}}
+#'
+#' @examples
+#' \dontrun{
+#' net <- learn.network(dataset, layering = layering, layer.struct = layer.struct)
+#' all.equivalent <- dag.to.all.equivalent.dags(dag(net), layering, layer.struct)
+#' }
+#'
+#' @export
+dag.to.all.equivalent.dags <- function(dag.adj.matrix, layering = NULL, layer.struct = NULL) {
+  cpdag <- dag.to.cpdag(dag.adj.matrix, layering, layer.struct)
+  all.dags <- extend_all(cpdag)
+  return(all.dags)
+}
 
 #' counts the edges in a WPDAG with their directionality
 #'
@@ -1125,4 +1156,133 @@ topological.sort <- function(dgraph)
   }
 
   return(order)
+}
+
+
+extend_all_recursive <- function(G_work, G_output) {
+  # Recursively extend all possible DAGs from a partially oriented graph.
+  # Extension of the algorithm in Dor, Tarsi 1992 "A Simple Algorithm to
+  # Construct a Consistent Extension of a Partially Oriented Graph" to find
+  # all consistent extensions.
+
+  # G_work: working copy used to find sinks (nodes get removed)
+  # G_output: accumulates the orientations (preserves all edges)
+
+  # Stop condition: no undirected edges left in working graph
+  if (all(!(G_work == 1 & t(G_work) == 1))) {
+    return(list(G_output))
+  }
+
+  candidates <- find_sink_candidates(G_work)
+  if (length(candidates) == 0) {
+    return(list())
+  }
+
+  dags <- list()
+  for (x in candidates) {
+    # Orient edges toward x in the output graph
+    G_output_new <- orient_toward(G_output, x)
+
+    # Remove x from working graph (for finding next sink)
+    G_work_new <- orient_toward(G_work, x)
+    G_work_new[x, ] <- 0
+    G_work_new[, x] <- 0
+
+    # Recursively process
+    dags <- c(dags, extend_all_recursive(G_work_new, G_output_new))
+  }
+  return(dags)
+}
+
+extend_all <- function(G) {
+  # Wrapper function that calls the recursive helper and removes duplicates
+  all_dags <- extend_all_recursive(G, G)
+
+  # Remove duplicates
+  unique_dags <- list()
+  for (dag in all_dags) {
+    is_duplicate <- FALSE
+    for (unique_dag in unique_dags) {
+      if (all(dag == unique_dag)) {
+        is_duplicate <- TRUE
+        break
+      }
+    }
+    if (!is_duplicate) {
+      unique_dags[[length(unique_dags) + 1]] <- dag
+    }
+  }
+
+  return(unique_dags)
+}
+
+is_clique <- function(G, nodes) {
+  if (length(nodes) <= 1) {
+    return(TRUE)
+  }
+  for (i in seq_along(nodes)) {
+    for (j in seq_along(nodes)) {
+      if (i < j) {
+        a <- nodes[i]
+        b <- nodes[j]
+        # Check adjacency in any direction
+        if (G[a, b] == 0 && G[b, a] == 0) {
+          return(FALSE)
+        }
+      }
+    }
+  }
+  return(TRUE)
+}
+
+find_sink_candidates <- function(G) {
+  n <- nrow(G)
+  sinks <- c()
+  for (x in 1:n) {
+    # Skip removed nodes
+    if (all(G[x, ] == 0) && all(G[, x] == 0)) next
+
+    # (a) x is a sink: no outgoing directed edges (x->j means G[x,j]=1 and G[j,x]=0)
+    has_outgoing <- any(G[x, ] == 1 & G[, x] == 0)
+    if (has_outgoing) next
+
+    # (b) All neighbors of x with undirected edges must form a clique
+    # Undirected edge: G[x,y]=1 AND G[y,x]=1
+    undirected_neighbors <- which(G[x, ] == 1 & G[, x] == 1)
+
+    # Check if undirected neighbors form a clique among themselves
+    if (length(undirected_neighbors) > 1) {
+      is_clique_valid <- TRUE
+      for (i in 1:(length(undirected_neighbors) - 1)) {
+        for (j in (i + 1):length(undirected_neighbors)) {
+          y1 <- undirected_neighbors[i]
+          y2 <- undirected_neighbors[j]
+          # Check if y1 and y2 are adjacent (in any direction)
+          if (G[y1, y2] == 0 && G[y2, y1] == 0) {
+            is_clique_valid <- FALSE
+            break
+          }
+        }
+        if (!is_clique_valid) break
+      }
+      if (!is_clique_valid) next
+    }
+
+    sinks <- c(sinks, x)
+  }
+  return(sinks)
+}
+
+orient_toward <- function(G, x) {
+  n <- nrow(G)
+  for (y in 1:n) {
+    # For undirected edge x-y (G[x,y]=1 AND G[y,x]=1), orient it as y -> x
+    # This means: keep G[y,x]=1 (edge from y to x) and set G[x,y]=0 (remove edge from x to y)
+    if (G[x, y] == 1 && G[y, x] == 1) {
+      G[x, y] <- 0 # remove x -> y
+      G[y, x] <- 1 # keep y -> x (so y -> x is directed)
+    }
+    # If there's already a directed edge y -> x (G[y,x]=1, G[x,y]=0), leave it as is
+  }
+  return(G)
 }
