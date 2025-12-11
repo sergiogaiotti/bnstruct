@@ -309,3 +309,64 @@ identify.subgraphs <- function(am) {
 
     return(subgs)
 }
+
+apply_discretization <- function(data, discretization_policy){
+  for (i in 1:ncol(data)){
+    if ( any(is.na(discretization_policy[[i]]))) {
+      next  # skip if no discretization policy for this column
+    }
+    
+    data[,i] <- as.matrix(cut(data[,i], unique(c(min(data[,i]), discretization_policy[[i]], max(data[,i]))), labels = FALSE, include.lowest = TRUE), nr,1)
+  }
+  storage.mode(data) <- "integer"
+  return(data)
+}
+
+detect_affected_continuous_vars <- function(old.g, new.g, cont.nodes) {
+  affected <- integer(0)  # store affected continuous var indices directly
+  
+  for (v in cont.nodes) {
+    # Rule 1: gained/lost parent
+    if (!all(old.g[, v] == new.g[, v])) {
+      affected <- c(affected, v)
+      next
+    }
+    
+    # Rule 2: gained/lost child
+    if (!all(old.g[v, ] == new.g[v, ])) {
+      affected <- c(affected, v)
+      next
+    }
+    
+    # Rule 3: any child changed parents
+    children <- which(old.g[v, ] == 1L | new.g[v, ] == 1L)
+    changed <- FALSE
+    for (child in children) {
+      if (!all(old.g[, child] == new.g[, child])) {
+        affected <- c(affected, v)
+        changed <- TRUE
+        break
+      }
+    }
+    if (changed) next
+  }
+  
+  affected
+}
+
+adj_to_parents_children <- function(adj) {
+  # Return parents and children lists for a given adjacency matrix
+  stopifnot(is.matrix(adj), nrow(adj) == ncol(adj))
+  n <- ncol(adj)
+  
+  parents  <- vector("list", n)
+  children <- vector("list", n)
+  
+  for (j in seq_len(n)) {
+    parents[[j]]  <- which(adj[, j] != 0L)
+    children[[j]] <- which(adj[j, ] != 0L)
+  }
+  
+  list(parents = parents, children = children)
+}
+
