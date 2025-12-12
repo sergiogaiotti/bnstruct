@@ -1357,7 +1357,8 @@ SEXP bnstruct_dvbn_discretize_all(SEXP data_cont, SEXP data_disc,
     int changed = 1;
     int iter = 0;
     int consecutive_no_change = 0; /* Early convergence detection */
-
+    // Debug print
+    // printf("Max number of cycles: %d\n", max_cycles);
     while (changed && iter < max_cycles)
     {
         changed = 0;
@@ -1407,9 +1408,9 @@ SEXP bnstruct_dvbn_discretize_all(SEXP data_cont, SEXP data_disc,
                                       parents_list, children_list,
                                       approx_c, lambda,
                                       &new_cuts, &new_n);
-                // Debug print for iteration tracking
-                printf("iter %d col_d=%d ns=%d lambda=%d ncuts=%d\n",
-                       iter, col_d, ns_c[col_d], lambda, new_n);
+                // // Debug print for iteration tracking
+                // printf("iter %d col_d=%d ns=%d lambda=%d ncuts=%d\n",
+                //        iter, col_d, ns_c[col_d], lambda, new_n);
             }
 
             if (!cuts_equal(cuts[j], ncuts[j], new_cuts, new_n))

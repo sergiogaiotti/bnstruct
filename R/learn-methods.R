@@ -635,7 +635,7 @@ setMethod(
         max.parents <- max.fanin
         max.parents.layers <- max.fanin.layers
       }
-      bnstruct.start.log("learning the structure using HC_DISC ...")
+      bnstruct.start.log("learning the structure using HC_disc ...")
 
       if (!is.null(init.net)) {
         in.dag <- dag(init.net)
@@ -680,7 +680,7 @@ setMethod(
           quantiles(bn)[[i]] <- c(min(data[, i]), discr[[i]], max(data[, i]))
         }
       }
-      bnstruct.end.log("learning using HC completed.")
+      bnstruct.end.log("learning using HC_disc completed.")
     } # end if algo == hc_disc
 
     if (algo == "mmhc") # default
