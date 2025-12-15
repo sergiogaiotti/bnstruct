@@ -42,6 +42,6 @@ SEXP bnstruct_dvbn_discretize_all(SEXP data_cont, SEXP data_disc,
                                   SEXP n_nodes, SEXP n_cases,
                                   SEXP n_cont, SEXP cont_index,
                                   SEXP ns, SEXP parents_list, SEXP children_list,
-                                  SEXP n_cycles, SEXP approx_parents, SEXP l_card);
+                                  SEXP n_cycles, SEXP approx_parents, SEXP l_card, SEXP pre_binning);
 
 #endif /* DVBN_H */

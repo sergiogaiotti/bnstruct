@@ -30,7 +30,7 @@ extern SEXP bnstruct_dvbn_discretize_all(SEXP, SEXP,
                                          SEXP, SEXP,
                                          SEXP, SEXP,
                                          SEXP, SEXP, SEXP,
-                                         SEXP, SEXP, SEXP);
+                                         SEXP, SEXP, SEXP, SEXP);
 
 static const R_CallMethodDef CallEntries[] = {
     {"bnstruct_all_fam_log_marg_lik", (DL_FUNC)&bnstruct_all_fam_log_marg_lik, 5},
@@ -46,7 +46,7 @@ static const R_CallMethodDef CallEntries[] = {
     {"bnstruct_next_comb", (DL_FUNC)&bnstruct_next_comb, 2},
     {"bnstruct_score_node", (DL_FUNC)&bnstruct_score_node, 6},
     {"bnstruct_dvbn_discretize_one", (DL_FUNC)&bnstruct_dvbn_discretize_one, 11},
-    {"bnstruct_dvbn_discretize_all", (DL_FUNC)&bnstruct_dvbn_discretize_all, 12},
+    {"bnstruct_dvbn_discretize_all", (DL_FUNC)&bnstruct_dvbn_discretize_all, 13},
     {NULL, NULL, 0}};
 
 void R_init_bnstruct(DllInfo *dll)

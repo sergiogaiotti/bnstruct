@@ -997,7 +997,167 @@ static void dp_and_edges(const double *Hb, int m,
     *cuts_out = cuts;
     *n_cuts_out = ncuts;
 }
+/* Optimized DP that works for pre-binned data */
+static void dp_and_edges_binned(SparseScorer *ss, int m,
+                                const double *X, int cont_col, const int *order, const int *tails,
+                                const double *split, int lambda,
+                                double **cuts_out, int *n_cuts_out)
+{
+    int n_cases = ss->n_cases;
 
+    double xmin = get_cont(X, n_cases, cont_col, order[0]);
+    double xmax = get_cont(X, n_cases, cont_col, order[n_cases - 1]);
+    double span = (xmax > xmin) ? (xmax - xmin) : 1.0;
+
+    double *best = (double *)xmalloc(sizeof(double) * (size_t)m);
+    int **choice = (int **)xcalloc((size_t)m, sizeof(int *));
+    int *clen = (int *)xcalloc((size_t)m, sizeof(int));
+
+    for (int a = 0; a < m; ++a)
+    {
+        int tail_a = tails[a];
+        if (a == 0)
+        {
+            double score = compute_sparse_score(ss, 0, tail_a);
+            best[0] = -log(split[tail_a]) + score;
+            choice[0] = (int *)xmalloc(sizeof(int));
+            choice[0][0] = tail_a;
+            clen[0] = 1;
+        }
+        else
+        {
+            double bv = INFINITY;
+            int *bs = NULL;
+            int bl = 0;
+
+            /* Parallel computation of candidate values for each breakpoint */
+            int num_candidates = a + 1;
+            double *candidate_vals = (double *)xmalloc(sizeof(double) * (size_t)num_candidates);
+            double **candidate_choices = (double **)xmalloc(sizeof(double *) * (size_t)num_candidates);
+            int *candidate_lens = (int *)xmalloc(sizeof(int) * (size_t)num_candidates);
+
+            /* Initialize arrays */
+            for (int b = 0; b <= a; ++b)
+            {
+                candidate_vals[b] = INFINITY;
+                candidate_choices[b] = NULL;
+                candidate_lens[b] = 0;
+            }
+
+#ifdef _OPENMP
+#pragma omp parallel for schedule(dynamic)
+#endif
+            for (int b = 0; b <= a; ++b)
+            {
+                double val;
+                if (b == a)
+                {
+                    double frac = (get_cont(X, n_cases, cont_col, order[tail_a]) - xmin) / span;
+                    double score = compute_sparse_score(ss, 0, tail_a);
+                    val = frac * (double)lambda - log(split[tail_a]) + score;
+                    /* Debug print */
+                    // if (a < 10)
+                    // {
+                    //     /* Calculate explicit penalties for debug */
+                    //     double len_penalty = frac * (double)lambda;
+                    //     double split_penalty = -log(split[tail_a]);
+                    //     printf("Base Interval 0->%d | Score: %.2f + LenPen: %.2f + SplitPen: %.2f = Total: %.2f\n",
+                    //            tail_a, score, len_penalty, split_penalty, val);
+                    // }
+                    /* Store single-element choice */
+                    candidate_choices[b] = (double *)xmalloc(sizeof(double));
+                    candidate_choices[b][0] = (double)tail_a;
+                    candidate_lens[b] = 1;
+                }
+                else
+                {
+                    /* FIX wrt original algo: The next segment starts immediately after the previous tail */
+                    int head_next = tails[b] + 1;
+                    double frac = (get_cont(X, n_cases, cont_col, order[tail_a]) -
+                                   get_cont(X, n_cases, cont_col, order[head_next])) /
+                                  span;
+
+                    double score = compute_sparse_score(ss, head_next, tail_a);
+                    val = best[b] + frac * (double)lambda - log(split[tail_a]) + score;
+
+                    /* Store extended choice */
+                    candidate_lens[b] = clen[b] + 1;
+                    candidate_choices[b] = (double *)xmalloc(sizeof(double) * (size_t)candidate_lens[b]);
+                    for (int k = 0; k < clen[b]; k++)
+                    {
+                        candidate_choices[b][k] = (double)choice[b][k];
+                    }
+                    candidate_choices[b][candidate_lens[b] - 1] = (double)tail_a;
+                }
+                candidate_vals[b] = val;
+            }
+
+            /* Sequential reduction to find minimum */
+            int best_b = -1;
+            for (int b = 0; b <= a; ++b)
+            {
+                if (candidate_vals[b] < bv)
+                {
+                    bv = candidate_vals[b];
+                    best_b = b;
+                }
+            }
+
+            /* Copy best choice */
+            if (best_b >= 0)
+            {
+                bl = candidate_lens[best_b];
+                bs = (int *)xmalloc(sizeof(int) * (size_t)bl);
+                for (int k = 0; k < bl; k++)
+                {
+                    bs[k] = (int)candidate_choices[best_b][k];
+                }
+            }
+
+            /* Cleanup candidate arrays */
+            for (int b = 0; b <= a; ++b)
+            {
+                if (candidate_choices[b])
+                {
+                    free(candidate_choices[b]);
+                }
+            }
+            free(candidate_vals);
+            free(candidate_choices);
+            free(candidate_lens);
+
+            best[a] = bv;
+            choice[a] = bs;
+            clen[a] = bl;
+        }
+    }
+
+    /* Reconstruct cuts */
+    int K = clen[m - 1];
+    int ncuts = (K > 1) ? (K - 1) : 0;
+    double *cuts = NULL;
+    if (ncuts > 0)
+    {
+        cuts = (double *)xmalloc(sizeof(double) * (size_t)ncuts);
+        for (int i = 0; i < ncuts; ++i)
+        {
+            int t = choice[m - 1][i];
+            double a_val = get_cont(X, n_cases, cont_col, order[t]);
+            double b_val = get_cont(X, n_cases, cont_col, order[t + 1]);
+            cuts[i] = 0.5 * (a_val + b_val);
+        }
+    }
+
+    for (int i = 0; i < m; ++i)
+        if (choice[i])
+            free(choice[i]);
+    free(choice);
+    free(clen);
+    free(best);
+
+    *cuts_out = cuts;
+    *n_cuts_out = ncuts;
+}
 /* Optimized DP that works directly with sparse scorer with early pruning */
 static void dp_and_edges_sparse(SparseScorer *ss, int m,
                                 const double *X, int cont_col, const int *order, const int *tails,
@@ -1067,7 +1227,15 @@ static void dp_and_edges_sparse(SparseScorer *ss, int m,
                     double frac = (get_cont(X, n_cases, cont_col, order[tail_a]) - xmin) / span;
                     double score = compute_sparse_score(ss, 0, tail_a);
                     val = frac * (double)lambda - log(split[tail_a]) + score;
-
+                    /* Debug print */
+                    // if (a < 10)
+                    // {
+                    //     /* Calculate explicit penalties for debug */
+                    //     double len_penalty = frac * (double)lambda;
+                    //     double split_penalty = -log(split[tail_a]);
+                    //     printf("Base Interval 0->%d | Score: %.2f + LenPen: %.2f + SplitPen: %.2f = Total: %.2f\n",
+                    //            tail_a, score, len_penalty, split_penalty, val);
+                    // }
                     /* Store single-element choice */
                     candidate_choices[b] = (double *)xmalloc(sizeof(double));
                     candidate_choices[b][0] = (double)tail_a;
@@ -1213,6 +1381,116 @@ static void algo1_discretize_core(const double *X, const int *D,
     *n_cuts_out = ncuts;
 }
 
+/* Algorithm 1 modification with pre binning; returns malloc'ed cuts array */
+static void algo1_discretize_w_pre_binning(const double *X, const int *D,
+                                           int n_nodes, int n_cases, const int *ns,
+                                           int cont_col, int target,
+                                           SEXP parents_list, SEXP children_list,
+                                           int approx_parents, int lambda, int pre_binning,
+                                           double **cuts_out, int *n_cuts_out)
+{
+    /* Debug print*/
+    Rprintf("Pre-binning into %d bins for continuous column %d\n", pre_binning, cont_col);
+    *cuts_out = NULL;
+    *n_cuts_out = 0;
+
+    int *order = argsort_col(X, n_cases, cont_col);
+
+    /* We map N cases into B bins.
+       Quantile strategy: Each bin gets roughly N/B items. */
+    int n_bins = (pre_binning < n_cases) ? pre_binning : n_cases;
+    int *temp_tails = (int *)xmalloc(sizeof(int) * (size_t)n_bins);
+    for (int b = 0; b < n_bins; ++b)
+    {
+        /* Calculate end index for bin 'b' */
+        /* Formula ensures even distribution: floor((b+1)*N / B) - 1 */
+        long long end_idx_long = ((long long)(b + 1) * n_cases) / n_bins - 1;
+        temp_tails[b] = (int)end_idx_long;
+
+        /* Ensure we don't split identical values.
+           Push tail forward if X[order[t]] == X[order[t+1]] */
+        while (temp_tails[b] < n_cases - 1)
+        {
+            double v_curr = get_cont(X, n_cases, cont_col, order[temp_tails[b]]);
+            double v_next = get_cont(X, n_cases, cont_col, order[temp_tails[b] + 1]);
+            if (v_curr != v_next)
+                break;
+            temp_tails[b]++;
+        }
+
+        /* Edge case: If pushing forward merges this bin with the next theoretical bin,
+           we might have fewer effective bins. */
+        if (b > 0 && temp_tails[b] <= temp_tails[b - 1])
+        {
+            temp_tails[b] = temp_tails[b - 1]; // Collapse empty/redundant bin
+        }
+    }
+
+    /* Compress tails to remove duplicates if distribution was skewed by ties */
+    int m = 0;
+    int *tails = (int *)xmalloc(sizeof(int) * (size_t)n_bins);
+    int last_t = -1;
+    for (int b = 0; b < n_bins; ++b)
+    {
+        if (temp_tails[b] > last_t)
+        {
+            tails[m++] = temp_tails[b];
+            last_t = temp_tails[b];
+        }
+    }
+    free(temp_tails);
+    /* m is now the effective number of split candidates */
+    /* Debug print m*/
+    int unique_count = 1;
+    for (int i = 0; i < n_cases - 1; ++i)
+    {
+        if (get_cont(X, n_cases, cont_col, order[i]) !=
+            get_cont(X, n_cases, cont_col, order[i + 1]))
+        {
+            unique_count++;
+        }
+    }
+    printf("Variable col %d: Requested %d bins, has %d unique vals, Resulting m = %d\n",
+           target, pre_binning, unique_count, m);
+    /* end debug print*/
+    /* 3. Compute Split Priors */
+    /* We calculate priors only for the chosen boundary points */
+    if (lambda <= 0)
+        lambda = max_card(ns, n_nodes);
+    double *split = compute_split_prior(X, n_cases, cont_col, order, lambda);
+    /* Note: compute_split_prior returns array of size n_cases.
+       The DP will access split[tails[a]]. This is valid.
+       Later optimization: Compute split only for m tails. */
+    SEXP pa_s = VECTOR_ELT(parents_list, target);
+    int n_pa = LENGTH(pa_s);
+    const int *pa_idx = (n_pa > 0) ? INTEGER(pa_s) : NULL;
+
+    SEXP ch_s = VECTOR_ELT(children_list, target);
+    int n_ch = LENGTH(ch_s);
+    const int *children = (n_ch > 0) ? INTEGER(ch_s) : NULL;
+
+    /* Use optimized sparse scorer  */
+    SparseScorer *ss = create_sparse_scorer(X, D, n_nodes, n_cases, target, order, ns,
+                                            pa_idx, n_pa, children, n_ch,
+                                            parents_list, approx_parents);
+    /* LATER MODIFICATION POINT:
+       SparseScorer *ss = create_binned_scorer(..., tails, m, ...);
+       This new function will aggregate D into 'm' bins and reduce memory to O(m).
+    */
+
+    double *cuts = NULL;
+    int ncuts = 0;
+    /* We pass our reduced list of 'tails' (size m) instead of the full natural tails. */
+    dp_and_edges_binned(ss, m, X, cont_col, order, tails, split, lambda, &cuts, &ncuts);
+
+    free_sparse_scorer(ss);
+    free(split);
+    free(order);
+    free(tails);
+    *cuts_out = cuts;
+    *n_cuts_out = ncuts;
+}
+
 static int cuts_equal(const double *a, int na, const double *b, int nb)
 {
     if (na != nb)
@@ -1325,7 +1603,7 @@ SEXP bnstruct_dvbn_discretize_all(SEXP data_cont, SEXP data_disc,
                                   SEXP n_nodes, SEXP n_cases,
                                   SEXP n_cont, SEXP cont_index,
                                   SEXP ns, SEXP parents_list, SEXP children_list,
-                                  SEXP n_cycles, SEXP approx_parents, SEXP l_card)
+                                  SEXP n_cycles, SEXP approx_parents, SEXP l_card, SEXP pre_binning)
 {
     if (!isReal(data_cont) || !isInteger(data_disc))
         error("data_cont must be REAL matrix; data_disc must be INTEGER matrix.");
@@ -1339,6 +1617,8 @@ SEXP bnstruct_dvbn_discretize_all(SEXP data_cont, SEXP data_disc,
         error("approx_parents must be integer scalar.");
     if (!isInteger(l_card))
         error("l_card must be integer scalar.");
+    if (!isInteger(pre_binning))
+        error("pre_binning must be integer scalar.");
 
     const double *X = REAL(data_cont);
     int *D = INTEGER(data_disc);
@@ -1350,7 +1630,7 @@ SEXP bnstruct_dvbn_discretize_all(SEXP data_cont, SEXP data_disc,
     int max_cycles = INTEGER(n_cycles)[0];
     int approx_c = INTEGER(approx_parents)[0];
     int lambda = INTEGER(l_card)[0];
-
+    int n_pre_bins = INTEGER(pre_binning)[0];
     double **cuts = (double **)xcalloc((size_t)n_cont_c, sizeof(double *));
     int *ncuts = (int *)xcalloc((size_t)n_cont_c, sizeof(int));
 
@@ -1359,6 +1639,7 @@ SEXP bnstruct_dvbn_discretize_all(SEXP data_cont, SEXP data_disc,
     int consecutive_no_change = 0; /* Early convergence detection */
     // Debug print
     // printf("Max number of cycles: %d\n", max_cycles);
+    Rprintf("Pre-binning bins: %d\n", n_pre_bins);
     while (changed && iter < max_cycles)
     {
         changed = 0;
@@ -1403,11 +1684,23 @@ SEXP bnstruct_dvbn_discretize_all(SEXP data_cont, SEXP data_disc,
             }
             else
             {
-                algo1_discretize_core(X, D, n_nodes_c, n_cases_c, ns_c,
-                                      j, col_d,
-                                      parents_list, children_list,
-                                      approx_c, lambda,
-                                      &new_cuts, &new_n);
+                if (n_pre_bins > 0)
+                {
+                    algo1_discretize_w_pre_binning(X, D,
+                                                   n_nodes_c, n_cases_c, ns_c,
+                                                   col_x, col_d,
+                                                   parents_list, children_list,
+                                                   approx_c, lambda, n_pre_bins,
+                                                   &new_cuts, &new_n);
+                }
+                else
+                {
+                    algo1_discretize_core(X, D, n_nodes_c, n_cases_c, ns_c,
+                                          j, col_d,
+                                          parents_list, children_list,
+                                          approx_c, lambda,
+                                          &new_cuts, &new_n);
+                }
                 // // Debug print for iteration tracking
                 // printf("iter %d col_d=%d ns=%d lambda=%d ncuts=%d\n",
                 //        iter, col_d, ns_c[col_d], lambda, new_n);
