@@ -610,6 +610,11 @@ setMethod(
       bnstruct.end.log("learning using HC completed.")
     } # end if algo == hc
     if (algo == "hc_disc") {
+      if ("pelt" %in% names(other.args)) {
+        pelt <- other.args$pelt
+      } else {
+        pelt <- 0L
+      }
       if ("n.pre.binning" %in% names(other.args)) {
         n.pre.binning <- other.args$n.pre.binning
         if (is.null(n.pre.binning)) {
@@ -661,7 +666,7 @@ setMethod(
             ess = ess,
             tabu.tenure = tabu.tenure, max.parents = max.parents, init.net = in.dag,
             wm.max = wm.max, layering = layering, layer.struct = layer.struct,
-            mandatory.edges = mandatory.edges, L_card = L_card, max.disc_cycles = max.disc_cycles, approx_parents = approx.parents, n.pre.binning = n.pre.binning
+            mandatory.edges = mandatory.edges, L_card = L_card, max.disc_cycles = max.disc_cycles, approx_parents = approx.parents, n.pre.binning = n.pre.binning, pelt = pelt
           )
           dag <- out.hc$dag
           finalPDAG <- finalPDAG + dag.to.cpdag(dag, layering, layer.struct)
@@ -677,7 +682,7 @@ setMethod(
           ess = ess,
           tabu.tenure = tabu.tenure, max.parents = max.parents, init.net = in.dag,
           wm.max = wm.max, layering = layering, layer.struct = layer.struct,
-          mandatory.edges = mandatory.edges, L_card = L_card, max.disc_cycles = max.disc_cycles, approx_parents = approx.parents, n.pre.binning = n.pre.binning
+          mandatory.edges = mandatory.edges, L_card = L_card, max.disc_cycles = max.disc_cycles, approx_parents = approx.parents, n.pre.binning = n.pre.binning, pelt = pelt
         )
         dag(bn) <- out.hc$dag
         # browser()

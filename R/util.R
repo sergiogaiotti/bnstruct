@@ -355,7 +355,7 @@ adj_to_parents_children <- function(adj) {
   list(parents = parents, children = children)
 }
 
-test_dvbn <- function(data, discreteness, dag, only_var = NULL, max.disc_cycles = 10L, approx.parents = 0L, L_card = NULL, n.pre.binning = 0L, n.init.disc = 3L) {
+test_dvbn <- function(data, discreteness, dag, only_var = NULL, max.disc_cycles = 10L, approx.parents = 0L, L_card = NULL, n.pre.binning = 0L, use_pelt = 0L, n.init.disc = 3L) {
   # browser()
   original.data <- data
   n.nodes <- ncol(data)
@@ -392,7 +392,7 @@ test_dvbn <- function(data, discreteness, dag, only_var = NULL, max.disc_cycles 
   disc.data <- as.integer(disc.data)
   affected_order <- as.integer(affected_order)
   discretization <- .Call("bnstruct_dvbn_discretize_all", original.data[, affected_order, drop = F], disc.data, n.nodes, n.cases, n.cont_affected, affected_order - 1L, node.sizes, lapply(curr.parents, function(x) as.integer(x - 1L)), lapply(curr.children, function(x) as.integer(x - 1L)),
-    max.disc_cycles, approx.parents, L_card, n.pre.binning,
+    max.disc_cycles, approx.parents, L_card, n.pre.binning, as.integer(use_pelt),
     PACKAGE = "bnstruct"
   )
   out.disc <- rep(list(), n.nodes)

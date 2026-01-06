@@ -485,7 +485,7 @@ g2 <- function(data, sizes, x, y, chi.th = 0.05, z = c(), min.counts = 5) {
 hc_w_disc <- function(data, node.sizes, scoring.func = 0, cpc, cont.nodes = c(), ess = 1, tabu.tenure = 100,
                       max.parents = length(node.sizes) - 1,
                       init.net = NULL, wm.max = 15, layering = NULL, layer.struct = NULL,
-                      mandatory.edges = NULL, L_card = NULL, max.disc_cycles = 10, approx_parents = 0, n.pre.binning = 0) {
+                      mandatory.edges = NULL, L_card = NULL, max.disc_cycles = 10, approx_parents = 0, n.pre.binning = 0, pelt = 0) {
   if (is.null(L_card)) {
     L_card <- -1L
   } else {
@@ -499,6 +499,7 @@ hc_w_disc <- function(data, node.sizes, scoring.func = 0, cpc, cont.nodes = c(),
   storage.mode(max.disc_cycles) <- "integer"
   storage.mode(cont.nodes) <- "integer"
   storage.mode(n.pre.binning) <- "integer"
+  storage.mode(pelt) <- "integer"
   # store original data
   original.data <- data
 
@@ -703,7 +704,7 @@ hc_w_disc <- function(data, node.sizes, scoring.func = 0, cpc, cont.nodes = c(),
       affected_order <- as.integer(rev(top_order[top_order %in% affected]))
 
       out.disc <- .Call("bnstruct_dvbn_discretize_all", original.data[, affected_order, drop = F], data, n.nodes, n.cases, n.cont_affected, affected_order - 1L, node.sizes, lapply(curr.parents, function(x) as.integer(x - 1L)), lapply(curr.children, function(x) as.integer(x - 1L)),
-        max.disc_cycles, approx_parents, L_card, n.pre.binning,
+        max.disc_cycles, approx_parents, L_card, n.pre.binning, pelt,
         PACKAGE = "bnstruct"
       )
       curr.discretization[affected_order] <- out.disc

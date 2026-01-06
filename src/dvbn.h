@@ -35,13 +35,22 @@ SEXP bnstruct_dvbn_discretize_one(SEXP data_cont, SEXP data_disc,
  *  n_cycles:     integer scalar (max iterations)
  *  approx_parents: integer scalar (0/1)
  *  l_card:       integer scalar (lambda parameter for Algorithm 1; if <=0, set to max cardinality of markov blanket of the continuous variable)
- *
+ *  pre_binning: integer scalar (number of quantyle-based pre-bins for reducing cut points only to quantiles; if <=0 | >=n_cases, no pre-binning)
  * Returns: list length n_cont, each element is REALSXP vector of cut points (min and max excluded) for that continuous variable.
  */
-SEXP bnstruct_dvbn_discretize_all(SEXP data_cont, SEXP data_disc,
-                                  SEXP n_nodes, SEXP n_cases,
-                                  SEXP n_cont, SEXP cont_index,
-                                  SEXP ns, SEXP parents_list, SEXP children_list,
-                                  SEXP n_cycles, SEXP approx_parents, SEXP l_card, SEXP pre_binning);
+SEXP bnstruct_dvbn_discretize_all(SEXP data_cont,
+                                  SEXP data_disc,
+                                  SEXP n_nodes,
+                                  SEXP n_cases,
+                                  SEXP n_cont,
+                                  SEXP cont_index,
+                                  SEXP ns,
+                                  SEXP parents_list,
+                                  SEXP children_list,
+                                  SEXP n_cycles,
+                                  SEXP approx_parents,
+                                  SEXP l_card,
+                                  SEXP pre_binning,
+                                  SEXP pelt);
 
 #endif /* DVBN_H */
