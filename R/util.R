@@ -355,11 +355,49 @@ adj_to_parents_children <- function(adj) {
   list(parents = parents, children = children)
 }
 
+rand.topological.sort <- function(dag) {
+  n.nodes <- ncol(dag)
+  in.degree <- colSums(dag)
+  zero.in.degree <- which(in.degree == 0L)
+  sorted.nodes <- integer(0)
+
+  while (length(zero.in.degree) > 0) {
+    # pick a random node among those with zero in-degree
+    if (length(zero.in.degree) == 1L) {
+      node <- zero.in.degree
+    } else {
+      node <- sample(zero.in.degree, 1)
+    }
+    sorted.nodes <- c(sorted.nodes, node)
+
+    # remove node from graph
+    children <- which(dag[node, ] != 0L)
+    for (child in children) {
+      in.degree[child] <- in.degree[child] - 1L
+      if (in.degree[child] == 0L) {
+        zero.in.degree <- c(zero.in.degree, child)
+      }
+    }
+    zero.in.degree <- setdiff(zero.in.degree, node)
+  }
+
+  if (length(sorted.nodes) != n.nodes) {
+    stop("The input graph is not acyclic.")
+  }
+
+  return(sorted.nodes)
+}
+
 test_dvbn <- function(data, discreteness, dag, only_var = NULL, max.disc_cycles = 10L, approx.parents = 0L, L_card = NULL, n.pre.binning = 0L, use_pelt = 0L, n.init.disc = 3L) {
   # browser()
+
   original.data <- data
   n.nodes <- ncol(data)
   n.cases <- nrow(data)
+
+  # Calculate lgamma cache vector
+  # lgamma_cache_vec <- lgamma(c(0:(n.cases + 100)))
+  lgamma_cache_vec <- NULL
   quanitles_cont <- lapply(data.frame(original.data[, !discreteness, drop = F]), function(col) quantile(col, probs = seq(0, 1, length.out = n.init.disc + 1), na.rm = TRUE))
   quantiles_all <- rep(list(NA), n.nodes)
   quantiles_all[!discreteness] <- quanitles_cont
@@ -392,7 +430,7 @@ test_dvbn <- function(data, discreteness, dag, only_var = NULL, max.disc_cycles 
   disc.data <- as.integer(disc.data)
   affected_order <- as.integer(affected_order)
   discretization <- .Call("bnstruct_dvbn_discretize_all", original.data[, affected_order, drop = F], disc.data, n.nodes, n.cases, n.cont_affected, affected_order - 1L, node.sizes, lapply(curr.parents, function(x) as.integer(x - 1L)), lapply(curr.children, function(x) as.integer(x - 1L)),
-    max.disc_cycles, approx.parents, L_card, n.pre.binning, as.integer(use_pelt),
+    max.disc_cycles, approx.parents, L_card, n.pre.binning, as.integer(use_pelt), lgamma_cache_vec,
     PACKAGE = "bnstruct"
   )
   out.disc <- rep(list(), n.nodes)

@@ -51,6 +51,7 @@ SEXP bnstruct_dvbn_discretize_all(SEXP data_cont,
                                   SEXP approx_parents,
                                   SEXP l_card,
                                   SEXP pre_binning,
-                                  SEXP pelt);
+                                  SEXP pelt,
+                                  SEXP lgamma_cache_vec);
 
 #endif /* DVBN_H */

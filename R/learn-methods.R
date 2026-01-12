@@ -397,9 +397,9 @@ setMethod(
     scoring.func(bn) <- c("BDeu", "AIC", "BIC")[scoring.func + 1]
 
     algo <- tolower(algo)
-    if (!algo %in% c("sm", "mmhc", "sem", "mmpc", "hc", "hc_disc")) {
+    if (!algo %in% c("sm", "mmhc", "sem", "mmpc", "hc", "hc_disc", "k2")) {
       bnstruct.log("structure learning algorithm not recognized, using MMHC")
-      bnstruct.log("(available options are: SM, MMHC, MMPC, HC, SEM, HC_DISC)")
+      bnstruct.log("(available options are: SM, MMHC, MMPC, HC, SEM, HC_DISC, K2)")
       algo <- "mmhc"
     }
 
@@ -764,6 +764,60 @@ setMethod(
         }
         bnstruct.end.log("learning using MMHC completed.")
       } # end if algo == mmhc
+
+    if (algo == "k2") {
+      if (max.parents < max.fanin ||
+        (is.null(layer.struct) && !is.null(max.parents.layers))) {
+        bnstruct.log(
+          "K2 uses 'max.fanin' and 'layer.struct' parameters, ",
+          "but apparently you set 'max.parents' and 'max.parents.layers', ",
+          "changing accordingly."
+        )
+        max.parents <- max.fanin
+        max.parents.layers <- max.fanin.layers
+      }
+      if ("n.starts" %in% names(other.args)) {
+        n.starts <- as.numeric(other.args$n.starts)
+      } else {
+        n.starts <- 50
+      }
+      bnstruct.start.log("learning the structure using K2 with n.starts = ", n.starts, " ...")
+
+      if (!is.null(init.net)) {
+        in.dag <- dag(init.net)
+      } else {
+        in.dag <- NULL
+      }
+
+      if (bootstrap) {
+        finalPDAG <- matrix(0, num.nodes, num.nodes)
+        for (i in seq_len(num.boots(dataset)))
+        {
+          data <- boot(dataset, i, use.imputed.data = use.imputed.data)
+          cpc <- matrix(rep(1, num.nodes * num.nodes), nrow = num.nodes, ncol = num.nodes)
+          dag <- K2(data, node.sizes, scoring.func, cpc, cont.nodes,
+            ess = ess, max.parents = max.parents, init.net = in.dag,
+            wm.max = wm.max, layering = layering, layer.struct = layer.struct,
+            mandatory.edges = mandatory.edges, n.starts = n.starts
+          )
+          finalPDAG <- finalPDAG + dag.to.cpdag(dag, layering, layer.struct)
+        }
+        wpdag(bn) <- finalPDAG
+      } else {
+        if (is.null(initial.cpc)) {
+          cpc <- matrix(rep(1, num.nodes * num.nodes), nrow = num.nodes, ncol = num.nodes)
+        } else {
+          cpc <- initial.cpc
+        }
+        dag(bn) <- K2(data, node.sizes, scoring.func, cpc, cont.nodes,
+          ess = ess,
+          max.parents = max.parents, init.net = in.dag,
+          wm.max = wm.max, layering = layering, layer.struct = layer.struct,
+          mandatory.edges = mandatory.edges, n.starts = n.starts
+        )
+      }
+      bnstruct.end.log("learning using K2 completed.")
+    } # end if algo == k2
 
     struct.algo(bn) <- algo
 

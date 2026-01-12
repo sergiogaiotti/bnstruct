@@ -502,7 +502,8 @@ hc_w_disc <- function(data, node.sizes, scoring.func = 0, cpc, cont.nodes = c(),
   storage.mode(pelt) <- "integer"
   # store original data
   original.data <- data
-
+  # Initialize lgamma cache vector
+  lgamma_cache_vec <- lgamma(c(0:(n.cases + 100)))
   # quantize data of continuous nodes
   levels <- rep(0, n.nodes)
   levels[cont.nodes] <- node.sizes[cont.nodes]
@@ -704,7 +705,7 @@ hc_w_disc <- function(data, node.sizes, scoring.func = 0, cpc, cont.nodes = c(),
       affected_order <- as.integer(rev(top_order[top_order %in% affected]))
 
       out.disc <- .Call("bnstruct_dvbn_discretize_all", original.data[, affected_order, drop = F], data, n.nodes, n.cases, n.cont_affected, affected_order - 1L, node.sizes, lapply(curr.parents, function(x) as.integer(x - 1L)), lapply(curr.children, function(x) as.integer(x - 1L)),
-        max.disc_cycles, approx_parents, L_card, n.pre.binning, pelt,
+        max.disc_cycles, approx_parents, L_card, n.pre.binning, pelt, lgamma_cache_vec,
         PACKAGE = "bnstruct"
       )
       curr.discretization[affected_order] <- out.disc
@@ -749,4 +750,157 @@ hc_w_disc <- function(data, node.sizes, scoring.func = 0, cpc, cont.nodes = c(),
   }
 
   return(list(dag = global.best.g, discretization = global.best.discretization))
+}
+
+K2 <- function(data, node.sizes, scoring.func = 0, cpc, cont.nodes = c(), ess = 1,
+               max.parents = length(node.sizes) - 1,
+               init.net = NULL, wm.max = 15, layering = NULL, layer.struct = NULL,
+               mandatory.edges = NULL, n.starts = 1) {
+  n.nodes <- ncol(data)
+  n.cases <- nrow(data)
+  # just to be sure
+  storage.mode(node.sizes) <- "integer"
+
+  # quantize data of continuous nodes
+  levels <- rep(0, n.nodes)
+  levels[cont.nodes] <- node.sizes[cont.nodes]
+
+  # data <- quantize.with.na.matrix( data, levels )
+  # data <- quantize.matrix( data, levels )
+  out.data <- quantize.matrix(data, levels)
+  data <- out.data$quant
+
+  # apply mandatory edges (if present)
+  m.edges <- matrix(0L, n.nodes, n.nodes)
+  if (!is.null(mandatory.edges)) {
+    m.edges <- m.edges | mandatory.edges
+  }
+  storage.mode(m.edges) <- "integer"
+
+  # start with init.net if not NULL, otherwise with empty matrix
+  if (!is.null(init.net)) {
+    curr.g <- init.net
+    # just to be sure
+    storage.mode(curr.g) <- "integer"
+    # add init edges out of cpc
+    cpc <- cpc | init.net | t(init.net)
+  } else {
+    curr.g <- matrix(0L, n.nodes, n.nodes)
+  } # integers!
+  curr.g <- curr.g | m.edges
+
+  # apply layering
+  if (!is.null(layer.struct) && is.null(layering)) {
+    stop("layer.struct provided without layering.\n")
+  }
+  if (!is.null(layering) && length(unique(layering)) > 1) {
+    n.layers <- length(unique(layering))
+
+    if (is.null(layer.struct)) {
+      layer.struct <- matrix(1L, n.layers, n.layers)
+      layer.struct[lower.tri(layer.struct)] <- 0
+      layer.struct[1, 1] <- 0
+    }
+
+    layers <- matrix(1L, n.nodes, n.nodes)
+    for (i in 1:n.layers) {
+      for (j in 1:n.layers) {
+        layers[which(layering == i), which(layering == j)] <- layer.struct[i, j]
+      }
+    }
+    diag(layers) <- 0
+
+    # keep only edges allowed by both the CPC / initial network and the layering
+    cpc <- cpc & layers
+    if (sum(m.edges | t(m.edges)) > 0L && sum(curr.g & layers) == 0L) {
+      stop("the mandatory edges provided are inconsistent with the given layering.\n")
+    }
+  }
+  # end apply layering
+
+  # generate random orders compatible with the partially ordered graph
+  p.order_graph <- matrix(0L, n.nodes, n.nodes)
+  for (i in 1:n.nodes) {
+    for (j in 1:n.nodes) {
+      if (cpc[i, j] != cpc[j, i]) {
+        if (cpc[i, j] == 1L) {
+          p.order_graph[i, j] <- 1L
+        } else {
+          p.order_graph[j, i] <- 1L
+        }
+      }
+    }
+  }
+  p.order_graph <- p.order_graph | m.edges
+  # generate random orders consistent with the partially ordered graph
+  orders <- lapply(rep(list(p.order_graph), n.starts * 10), rand.topological.sort)
+  # Keep only n.starts unique orders if available
+  orders <- unique(orders)
+  if (length(orders) > n.starts) {
+    orders <- orders[1:n.starts]
+  } else {
+    message(sprintf("Only %d unique orders could be generated. Requested n.starts were %d. Running with available orders.", length(orders), n.starts))
+  }
+  # end generate random orders
+
+  # initialize scores
+  curr.score.nodes <- array(0, n.nodes)
+  for (i in 1L:n.nodes) {
+    curr.score.nodes[i] <- .Call("bnstruct_score_node", data, node.sizes, i - 1L, which(curr.g[, i] != 0) - 1L,
+      scoring.func, ess,
+      PACKAGE = "bnstruct"
+    )
+  }
+
+  # initialize global best solution
+  global.best.g <- curr.g
+  global.best.score <- sum(curr.score.nodes)
+
+  curr.g.preK2 <- curr.g
+  curr.score.nodes.preK2 <- curr.score.nodes
+
+  # K2 search for each order
+  for (start in seq_along(orders)) {
+    order <- orders[[start]]
+    # reset to pre-K2 state
+    curr.g <- curr.g.preK2
+    curr.score.nodes <- curr.score.nodes.preK2
+    # Main K2 loop
+    for (i in 1L:n.nodes) {
+      node <- order[i]
+      while (TRUE) {
+        best.par <- -1L
+        best.s.diff <- 0L
+        for (par in order[seq_len(i - 1L)]) {
+          if (curr.g[par, node] == 0 && cpc[par, node] == 1L && (m.edges[par, node] == 0 && m.edges[node, par] == 0) && sum(curr.g[, node]) < max.parents) {
+            next.g <- curr.g
+            next.g[par, node] <- 1L
+            s.diff <- .Call("bnstruct_score_node", data, node.sizes, node - 1L, which(next.g[, node] != 0) - 1L,
+              scoring.func, ess,
+              PACKAGE = "bnstruct"
+            ) - curr.score.nodes[node]
+            if (s.diff > best.s.diff) {
+              best.s.diff <- s.diff
+              best.par <- par
+            }
+          }
+        }
+        if (best.par != -1L) {
+          curr.g[best.par, node] <- 1L
+          curr.score.nodes[node] <- curr.score.nodes[node] + best.s.diff
+        } else {
+          break
+        }
+      }
+    } # end K2 for the given order
+
+    # check for global best
+    if (global.best.score < sum(curr.score.nodes)) # check for global best
+      {
+        global.best.g <- curr.g
+        global.best.score <- sum(curr.score.nodes)
+      }
+  } # end loop over orders
+
+  return(global.best.g)
 }
