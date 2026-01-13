@@ -396,8 +396,7 @@ test_dvbn <- function(data, discreteness, dag, only_var = NULL, max.disc_cycles 
   n.cases <- nrow(data)
 
   # Calculate lgamma cache vector
-  # lgamma_cache_vec <- lgamma(c(0:(n.cases + 100)))
-  lgamma_cache_vec <- NULL
+  lgamma_cache_vec <- lgamma(c(0:(n.cases + 100)))
   quanitles_cont <- lapply(data.frame(original.data[, !discreteness, drop = F]), function(col) quantile(col, probs = seq(0, 1, length.out = n.init.disc + 1), na.rm = TRUE))
   quantiles_all <- rep(list(NA), n.nodes)
   quantiles_all[!discreteness] <- quanitles_cont
