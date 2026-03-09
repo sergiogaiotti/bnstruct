@@ -867,16 +867,112 @@ setMethod(
       mar <- 0
     }
 
-    num.nodes <- num.nodes(x)
-    obs <- matrix(rep(0, num.nodes * n), nrow = n, ncol = num.nodes)
+    bn <- x
+    dag.mat <- dag(bn)
+    cpts.list <- cpts(bn)
+    nn <- num.nodes(bn)
+    vars <- variables(bn)
+    ns <- node.sizes(bn)
+    disc <- discreteness(bn)
+    quants <- quantiles(bn)
 
-    for (i in 1:n) {
-      obs[i, ] <- sample.row(x, mar)
+    # Compute structure ONCE
+    parents <- lapply(1:nn, function(i) which(dag.mat[, i] != 0))
+    sorted.nodes <- topological.sort(dag.mat)
+
+    dim.vars <- lapply(
+      1:nn,
+      function(i) {
+        match(
+          c(unlist(names(dimnames(cpts.list[[i]])))),
+          c(vars)
+        )
+      }
+    )
+
+    # Pre-compute conditional probability matrices for each node.
+    # cond.prob.mat[[node]]: matrix with rows = parent configs, cols = node values.
+    # parent.dim.vars[[node]]: ordered parent variable indices matching the CPT dimension order.
+    # parent.dim.sizes[[node]]: sizes of parent variables in that order.
+    cond.prob.mat <- vector("list", nn)
+    parent.dim.sizes <- vector("list", nn)
+    parent.dim.vars <- vector("list", nn)
+
+    for (node in 1:nn) {
+      if (length(parents[[node]]) == 0) {
+        # Root node: probability vector stored as single-row matrix
+        cond.prob.mat[[node]] <- matrix(c(cpts.list[[node]]), nrow = 1)
+      } else {
+        cpt <- cpts.list[[node]]
+        dv <- dim.vars[[node]]
+
+        # Find which dimension corresponds to the node itself vs parents
+        node.dim.pos <- which(dv == node)
+        parent.dim.pos <- which(dv != node)
+        p.vars <- dv[parent.dim.pos]
+
+        # Permute so parent dimensions come first, node dimension is last
+        perm.order <- c(parent.dim.pos, node.dim.pos)
+        cpt.perm <- aperm(cpt, perm.order)
+
+        # Reshape to matrix: rows = parent configs (column-major), cols = node values
+        n.parent.configs <- prod(ns[p.vars])
+        cond.prob.mat[[node]] <- matrix(c(cpt.perm),
+          nrow = n.parent.configs,
+          ncol = ns[node]
+        )
+        parent.dim.sizes[[node]] <- ns[p.vars]
+        parent.dim.vars[[node]] <- p.vars
+      }
     }
 
-    # storage.mode(obs) <- "integer"
+    # Pre-allocate output matrix
+    obs <- matrix(0, nrow = n, ncol = nn)
 
-    bnd <- BNDataset(obs, discreteness(x), variables(x), node.sizes(x))
+    # Sample all n rows, processing nodes in topological order
+    for (node in sorted.nodes) {
+      if (length(parents[[node]]) == 0) {
+        # Root node: sample all n values at once
+        obs[, node] <- sample.int(ns[node], n, replace = TRUE, prob = cond.prob.mat[[node]][1, ])
+      } else {
+        pv <- parent.dim.vars[[node]]
+        ps <- parent.dim.sizes[[node]]
+
+        # Compute linear index into parent config for all n samples (column-major)
+        parent.vals <- obs[, pv, drop = FALSE]
+        cum.sizes <- c(1L, cumprod(ps[-length(ps)]))
+        config.idx <- as.integer((parent.vals - 1L) %*% cum.sizes + 1L)
+
+        # Group samples by parent config and sample in bulk
+        unique.configs <- unique(config.idx)
+        for (cfg in unique.configs) {
+          mask <- which(config.idx == cfg)
+          obs[mask, node] <- sample.int(ns[node], length(mask),
+            replace = TRUE,
+            prob = cond.prob.mat[[node]][cfg, ]
+          )
+        }
+      }
+    }
+
+    # Sample continuous values from quantile intervals (vectorized)
+    if (length(quants) > 0) {
+      for (node in sorted.nodes) {
+        if (disc[node] == FALSE && length(quants[[node]]) > 1) {
+          lb <- quants[[node]][obs[, node]]
+          ub <- quants[[node]][obs[, node] + 1L]
+          obs[, node] <- runif(n, lb, ub)
+        }
+      }
+    }
+
+    # Handle missing at random (vectorized)
+    if (mar > 0) {
+      missing.mask <- matrix(runif(n * nn), nrow = n, ncol = nn) < mar
+      obs[missing.mask] <- NA
+    }
+
+    bnd <- BNDataset(obs, disc, vars, ns)
 
     return(bnd)
   }
