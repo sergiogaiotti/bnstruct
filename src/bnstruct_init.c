@@ -13,6 +13,11 @@ extern SEXP bnstruct_compute_counts(SEXP, SEXP);
 extern SEXP bnstruct_compute_counts_nas(SEXP, SEXP);
 extern SEXP bnstruct_fbp(SEXP);
 extern SEXP bnstruct_fbs(SEXP, SEXP);
+extern SEXP bnstruct_fbs_with_scores(SEXP, SEXP);
+extern SEXP bnstruct_bdeu_loo_bounds(SEXP, SEXP, SEXP, SEXP);
+extern SEXP bnstruct_compute_bg_cons(SEXP, SEXP, SEXP);
+extern SEXP bnstruct_compute_bg_tight(SEXP, SEXP, SEXP, SEXP, SEXP);
+extern SEXP bnstruct_compute_bf(SEXP);
 extern SEXP bnstruct_fumt_mask(SEXP, SEXP);
 extern SEXP bnstruct_g2_stat(SEXP, SEXP);
 extern SEXP bnstruct_heom_dist(SEXP, SEXP, SEXP, SEXP);
@@ -38,6 +43,11 @@ static const R_CallMethodDef CallEntries[] = {
     {"bnstruct_compute_counts_nas", (DL_FUNC)&bnstruct_compute_counts_nas, 2},
     {"bnstruct_fbp", (DL_FUNC)&bnstruct_fbp, 1},
     {"bnstruct_fbs", (DL_FUNC)&bnstruct_fbs, 2},
+    {"bnstruct_fbs_with_scores", (DL_FUNC)&bnstruct_fbs_with_scores, 2},
+    {"bnstruct_bdeu_loo_bounds", (DL_FUNC)&bnstruct_bdeu_loo_bounds, 4},
+    {"bnstruct_compute_bg_cons", (DL_FUNC)&bnstruct_compute_bg_cons, 3},
+    {"bnstruct_compute_bg_tight", (DL_FUNC)&bnstruct_compute_bg_tight, 5},
+    {"bnstruct_compute_bf", (DL_FUNC)&bnstruct_compute_bf, 1},
     {"bnstruct_fumt_mask", (DL_FUNC)&bnstruct_fumt_mask, 2},
     {"bnstruct_g2_stat", (DL_FUNC)&bnstruct_g2_stat, 2},
     {"bnstruct_heom_dist", (DL_FUNC)&bnstruct_heom_dist, 4},
