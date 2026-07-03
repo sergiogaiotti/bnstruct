@@ -181,23 +181,54 @@ SEXP bnstruct_bdeu_loo_bounds(SEXP data, SEXP node_sizes, SEXP imp_fam_mask, SEX
 	double alpha = *(REAL(ess));
 	unsigned int *pa = (unsigned int *)R_alloc(n_nodes, sizeof(unsigned int));
 
-	// allocate outputs
-	SEXP res, lower_sexp, upper_sexp, names;
-	PROTECT(res = allocVector(VECSXP, 2));
+	// maximum number of states over all nodes (for the per-child-value arrays)
+	unsigned int max_r = 1;
+	for (i = 0; i < n_nodes; i++)
+		if (ns[i] > max_r)
+			max_r = ns[i];
+
+	// allocate outputs.
+	// lower/upper: global min/max of the local delta per (node, parent set).
+	// lower_k/upper_k: min/max of the local delta restricted to each child
+	// value k, as 3D arrays [n_nodes, pow_nodes, max_r]. These enable the
+	// coupled (same-child-value) leave-one-out margin.
+	SEXP res, lower_sexp, upper_sexp, lower_k_sexp, upper_k_sexp, names, dim_k;
+	PROTECT(res = allocVector(VECSXP, 4));
 	PROTECT(lower_sexp = allocMatrix(REALSXP, n_nodes, pow_nodes));
 	PROTECT(upper_sexp = allocMatrix(REALSXP, n_nodes, pow_nodes));
-	PROTECT(names = allocVector(STRSXP, 2));
+	PROTECT(lower_k_sexp = allocVector(REALSXP, (R_xlen_t)n_nodes * pow_nodes * max_r));
+	PROTECT(upper_k_sexp = allocVector(REALSXP, (R_xlen_t)n_nodes * pow_nodes * max_r));
+	PROTECT(dim_k = allocVector(INTSXP, 3));
+	INTEGER(dim_k)[0] = n_nodes;
+	INTEGER(dim_k)[1] = pow_nodes;
+	INTEGER(dim_k)[2] = max_r;
+	setAttrib(lower_k_sexp, R_DimSymbol, dim_k);
+	setAttrib(upper_k_sexp, R_DimSymbol, duplicate(dim_k));
+	PROTECT(names = allocVector(STRSXP, 4));
 
 	SET_STRING_ELT(names, 0, mkChar("lower"));
 	SET_STRING_ELT(names, 1, mkChar("upper"));
+	SET_STRING_ELT(names, 2, mkChar("lower_k"));
+	SET_STRING_ELT(names, 3, mkChar("upper_k"));
 	setAttrib(res, R_NamesSymbol, names);
 
 	double *lower = REAL(lower_sexp);
 	double *upper = REAL(upper_sexp);
+	double *lower_k = REAL(lower_k_sexp);
+	double *upper_k = REAL(upper_k_sexp);
 	for (i = 0; i < n_nodes * pow_nodes; i++)
 	{
 		lower[i] = 0.0;
 		upper[i] = 0.0;
+	}
+	{
+		R_xlen_t t;
+		R_xlen_t nk = (R_xlen_t)n_nodes * pow_nodes * max_r;
+		for (t = 0; t < nk; t++)
+		{
+			lower_k[t] = R_PosInf;
+			upper_k[t] = R_NegInf;
+		}
 	}
 
 	for (i = 0; i < n_nodes; i++)
@@ -241,6 +272,14 @@ SEXP bnstruct_bdeu_loo_bounds(SEXP data, SEXP node_sizes, SEXP imp_fam_mask, SEX
 			double max_delta = R_NegInf;
 			int seen = 0;
 
+			double low_k_local[r_i];
+			double up_k_local[r_i];
+			for (k = 0; k < (int)r_i; k++)
+			{
+				low_k_local[k] = R_PosInf;
+				up_k_local[k] = R_NegInf;
+			}
+
 			for (ex = 0; ex < n_ex; ex++)
 			{
 				int index = 0;
@@ -277,6 +316,10 @@ SEXP bnstruct_bdeu_loo_bounds(SEXP data, SEXP node_sizes, SEXP imp_fam_mask, SEX
 						min_delta = delta;
 					if (delta > max_delta)
 						max_delta = delta;
+					if (delta < low_k_local[k])
+						low_k_local[k] = delta;
+					if (delta > up_k_local[k])
+						up_k_local[k] = delta;
 					seen = 1;
 				}
 			}
@@ -290,13 +333,23 @@ SEXP bnstruct_bdeu_loo_bounds(SEXP data, SEXP node_sizes, SEXP imp_fam_mask, SEX
 			lower[pos] = min_delta;
 			upper[pos] = max_delta;
 
+			for (k = 0; k < (int)r_i; k++)
+			{
+				R_xlen_t idx_k = (R_xlen_t)i + (R_xlen_t)n_nodes * j +
+								 (R_xlen_t)n_nodes * pow_nodes * k;
+				lower_k[idx_k] = low_k_local[k];
+				upper_k[idx_k] = up_k_local[k];
+			}
+
 			free(counts);
 		}
 
 	SET_VECTOR_ELT(res, 0, lower_sexp);
 	SET_VECTOR_ELT(res, 1, upper_sexp);
+	SET_VECTOR_ELT(res, 2, lower_k_sexp);
+	SET_VECTOR_ELT(res, 3, upper_k_sexp);
 
-	UNPROTECT(4);
+	UNPROTECT(7);
 	return res;
 }
 

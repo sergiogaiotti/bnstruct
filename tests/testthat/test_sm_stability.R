@@ -105,6 +105,29 @@ test_that("CPDAG certificate is sound: certified => all LOO CPDAGs invariant", {
 })
 
 
+test_that("coupled parent margin certifies a strongly dependent 2-node CPDAG", {
+    set.seed(11)
+    N <- 300
+    x1 <- ifelse(runif(N) < 0.6, 1L, 2L)
+    x2 <- ifelse(runif(N) < 0.92, x1, 3L - x1)
+    X <- cbind(x1, x2)
+    storage.mode(X) <- "integer"
+    ns <- c(2L, 2L)
+
+    res <- bnstruct:::sm(X, ns, stability = TRUE, stability.target = "cpdag")
+    st <- res$stability
+    # with 2 nodes the only structural decision is the parent (edge) choice
+    expect_true(st$stable_cpdag)
+    expect_length(st$parent_fragile, 0)
+
+    # soundness: certified => every leave-one-out CPDAG matches the base
+    base_key <- sm_cpdag_key(bnstruct:::sm(X, ns))
+    for (i in seq_len(N)) {
+        expect_equal(sm_cpdag_key(bnstruct:::sm(X[-i, , drop = FALSE], ns)), base_key)
+    }
+})
+
+
 test_that("oriented-DAG certificate is sound: certified => all LOO DAGs invariant", {
     res <- bnstruct:::sm(sm_small_data, sm_small_sizes,
         stability = TRUE, stability.target = "dag", stability.bound = "asym_tight"

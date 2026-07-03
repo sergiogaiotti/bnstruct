@@ -198,9 +198,76 @@ sm_asym_parent_witness <- function(i_star, U_mask, mask, aflml, bps, ifm,
     NULL
 }
 
+# Coupled (same-child-value) parent-set fragility test for family (i, U).
+#
+# A removed row fixes the child value k across all parent sets of node i, so the
+# winner and every competitor must be evaluated at the SAME k. Using per-child
+# deltas (lower_k / upper_k) gives, for competitor P,
+#   margin(P) = s(P*) - s(P) + min_k [ lower_k(P*,k) - upper_k(P,k) ],
+# a valid lower bound on the true leave-one-out margin that is strictly tighter
+# than the decoupled min/max bound. The parent choice is certified iff every
+# competitor has margin > 0. Returns a witness list if not certified, else NULL.
+sm_coupled_parent_witness <- function(i_star, U_mask, mask, aflml, bps, ifm,
+                                      node.sizes, lower_k, upper_k,
+                                      lower_delta, upper_delta) {
+    u_idx <- U_mask + 1
+    p_star_idx <- bps[i_star, u_idx]
+    best_score <- aflml[i_star, p_star_idx]
+    if (!is.finite(best_score)) {
+        return(NULL)
+    }
+    r <- node.sizes[i_star]
+    low_star <- lower_k[i_star, p_star_idx, seq_len(r)]
+
+    worst_margin <- Inf
+    p_risk <- NA_integer_
+    coupled_at_risk <- NA_real_
+
+    p_mask <- U_mask
+    repeat {
+        p_idx <- p_mask + 1
+        if (ifm[i_star, p_idx] && p_idx != p_star_idx) {
+            up_P <- upper_k[i_star, p_idx, seq_len(r)]
+            valid <- is.finite(low_star) & is.finite(up_P)
+            if (any(valid)) {
+                coupled <- min(low_star[valid] - up_P[valid])
+            } else {
+                # no shared child value: fall back to the decoupled bound (safe)
+                coupled <- lower_delta[i_star, p_star_idx] - upper_delta[i_star, p_idx]
+            }
+            margin <- best_score - aflml[i_star, p_idx] + coupled
+            if (margin < worst_margin) {
+                worst_margin <- margin
+                p_risk <- p_idx
+                coupled_at_risk <- coupled
+            }
+        }
+        if (p_mask == 0) {
+            break
+        }
+        p_mask <- bitAnd(p_mask - 1, U_mask)
+    }
+
+    if (is.finite(worst_margin) && worst_margin <= 0) {
+        return(list(
+            subset = mask,
+            node = i_star,
+            best_parent_set = p_star_idx,
+            competitor_parent_set = p_risk,
+            s_best = best_score,
+            s_competitor = aflml[i_star, p_risk],
+            coupled_term = coupled_at_risk,
+            margin = worst_margin,
+            type = "parent"
+        ))
+    }
+    NULL
+}
+
 # Sound CPDAG-stability certificate (see stability_findings_and_redesign.md, 3.1).
-# Uses asymmetric-tight bounds Lg/Ug/LF/UF plus the local delta bounds.
+# Uses asymmetric-tight bounds Lg/Ug/LF/UF plus the coupled local delta bounds.
 sm_cpdag_certificate <- function(aflml, bps, F, ifm, lower_delta, upper_delta,
+                                 lower_k, upper_k, node.sizes,
                                  Lg, Ug, LF, UF, dag, n.nodes, eps = 1e-9) {
     bit <- 2^(seq_len(n.nodes) - 1)
     base_key <- sm_cpdag_key(dag)
@@ -260,10 +327,14 @@ sm_cpdag_certificate <- function(aflml, bps, F, ifm, lower_delta, upper_delta,
             }
         }
 
-        # Condition 3: family/parent decision stable for each optimal winner.
+        # Condition 3: family/parent decision stable for each optimal winner
+        # (coupled same-child-value margin).
         for (w in winners) {
             U <- bitXor(S, bit[w])
-            wt <- sm_asym_parent_witness(w, U, S, aflml, bps, ifm, lower_delta, upper_delta)
+            wt <- sm_coupled_parent_witness(
+                w, U, S, aflml, bps, ifm, node.sizes,
+                lower_k, upper_k, lower_delta, upper_delta
+            )
             if (!is.null(wt)) {
                 parent_fragile[[length(parent_fragile) + 1]] <- wt
             }
@@ -337,6 +408,7 @@ sm_stability_bdeu <- function(
         )
         cert <- sm_cpdag_certificate(
             aflml, bps, F, ifm, lower_delta, upper_delta,
+            bounds$lower_k, bounds$upper_k, node.sizes,
             g_bounds$lower, g_bounds$upper, f_bounds$lower, f_bounds$upper,
             dag, n.nodes
         )
