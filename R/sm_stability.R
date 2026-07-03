@@ -12,6 +12,281 @@ sm_path_subsets <- function(sinks, n.nodes) {
     subsets
 }
 
+# ---------------------------------------------------------------------------
+# CPDAG (Markov equivalence class) helpers
+#
+# BDeu is score-equivalent: Markov-equivalent DAGs (same skeleton and same
+# v-structures) receive identical scores. Edge orientation inside the optimal
+# class is therefore not identifiable from the score, and SM's sink ties are
+# exactly this orientation freedom. The well-posed object to certify is the
+# CPDAG = (skeleton, v-structures), not the oriented adjacency.
+# ---------------------------------------------------------------------------
+
+# undirected skeleton of a DAG adjacency matrix
+sm_skeleton <- function(dag) {
+    (dag | t(dag)) * 1L
+}
+
+# unshielded colliders a -> c <- b with a, b non-adjacent; canonical string keys
+sm_vstructures <- function(dag) {
+    p <- nrow(dag)
+    vs <- character(0)
+    for (child in seq_len(p)) {
+        pa <- which(dag[, child] == 1L)
+        if (length(pa) >= 2) {
+            for (a in seq_len(length(pa) - 1)) {
+                for (b in seq(a + 1, length(pa))) {
+                    x <- pa[a]
+                    y <- pa[b]
+                    if (dag[x, y] == 0L && dag[y, x] == 0L) {
+                        vs <- c(vs, paste0(min(x, y), "-", child, "-", max(x, y)))
+                    }
+                }
+            }
+        }
+    }
+    sort(unique(vs))
+}
+
+# CPDAG identity: skeleton + v-structure set
+sm_cpdag_key <- function(dag) {
+    paste0(paste(sm_skeleton(dag), collapse = ""), "|", paste(sm_vstructures(dag), collapse = ","))
+}
+
+# Enumerate all score-optimal DAGs by branching on EXACT sink ties.
+# Bounded by call.cap / dag.cap; sets truncated = TRUE if either is hit.
+sm_enumerate_optimal_dags <- function(aflml, bps, F, n.nodes, eps = 1e-9,
+                                      dag.cap = 20000L, call.cap = 500000L) {
+    bit <- 2^(seq_len(n.nodes) - 1)
+    full <- 2^n.nodes - 1
+    dags <- list()
+    seen <- new.env(hash = TRUE)
+    truncated <- FALSE
+    calls <- 0L
+
+    rec <- function(S, parents) {
+        if (truncated) {
+            return(invisible())
+        }
+        calls <<- calls + 1L
+        if (calls > call.cap) {
+            truncated <<- TRUE
+            return(invisible())
+        }
+        if (S == 0) {
+            dag <- matrix(0L, n.nodes, n.nodes)
+            for (v in seq_len(n.nodes)) {
+                ps <- parents[[v]]
+                if (!is.null(ps) && ps > 1) {
+                    pset <- which(bitAnd(ps - 1, bit) > 0)
+                    dag[pset, v] <- 1L
+                }
+            }
+            key <- paste(dag, collapse = "")
+            if (is.null(seen[[key]])) {
+                assign(key, TRUE, envir = seen)
+                dags[[length(dags) + 1]] <<- dag
+                if (length(dags) > dag.cap) {
+                    truncated <<- TRUE
+                }
+            }
+            return(invisible())
+        }
+        nodes <- which(bitAnd(S, bit) > 0)
+        A <- vapply(nodes, function(i) {
+            U <- bitXor(S, bit[i])
+            F[U + 1] + aflml[i, bps[i, U + 1]]
+        }, numeric(1))
+        winners <- nodes[abs(A - max(A)) < eps]
+        for (w in winners) {
+            if (truncated) {
+                return(invisible())
+            }
+            U <- bitXor(S, bit[w])
+            pr <- parents
+            pr[[w]] <- bps[w, U + 1]
+            rec(U, pr)
+        }
+    }
+
+    rec(full, vector("list", n.nodes))
+    list(dags = dags, truncated = truncated)
+}
+
+# Visit every subset reachable as an SM state along ANY optimal-order branch.
+# Each subset is expanded once; records the tied winner group at each subset.
+sm_optimal_visited <- function(aflml, bps, F, n.nodes, eps = 1e-9) {
+    bit <- 2^(seq_len(n.nodes) - 1)
+    full <- 2^n.nodes - 1
+    visited <- logical(2^n.nodes)
+    winfo <- vector("list", 2^n.nodes)
+    order_subsets <- integer(0)
+    stack <- full
+    visited[full + 1] <- TRUE
+
+    while (length(stack) > 0) {
+        S <- stack[length(stack)]
+        stack <- stack[-length(stack)]
+        order_subsets <- c(order_subsets, S)
+        nodes <- which(bitAnd(S, bit) > 0)
+        A <- vapply(nodes, function(i) {
+            U <- bitXor(S, bit[i])
+            F[U + 1] + aflml[i, bps[i, U + 1]]
+        }, numeric(1))
+        winners <- nodes[abs(A - max(A)) < eps]
+        winfo[[S + 1]] <- list(nodes = nodes, A = A, winners = winners)
+        for (w in winners) {
+            U <- bitXor(S, bit[w])
+            if (U > 0 && !visited[U + 1]) {
+                visited[U + 1] <- TRUE
+                stack <- c(stack, U)
+            }
+        }
+    }
+    list(subsets = order_subsets, winfo = winfo)
+}
+
+# Directional (asymmetric-tight) parent-set fragility test for family (i, U).
+# Returns a witness list if the parent choice is not certified, else NULL.
+sm_asym_parent_witness <- function(i_star, U_mask, mask, aflml, bps, ifm,
+                                   lower_delta, upper_delta) {
+    u_idx <- U_mask + 1
+    p_star_idx <- bps[i_star, u_idx]
+    best_score <- aflml[i_star, p_star_idx]
+    if (!is.finite(best_score)) {
+        return(NULL)
+    }
+    max_risk <- -Inf
+    p_risk <- NA_integer_
+    p_mask <- U_mask
+    repeat {
+        p_idx <- p_mask + 1
+        if (ifm[i_star, p_idx] && p_idx != p_star_idx) {
+            risk <- aflml[i_star, p_idx] + upper_delta[i_star, p_idx]
+            if (risk > max_risk) {
+                max_risk <- risk
+                p_risk <- p_idx
+            }
+        }
+        if (p_mask == 0) {
+            break
+        }
+        p_mask <- bitAnd(p_mask - 1, U_mask)
+    }
+    if (!is.finite(max_risk)) {
+        return(NULL)
+    }
+    lhs <- best_score + lower_delta[i_star, p_star_idx]
+    rhs <- max_risk
+    if (!is.finite(lhs) || !is.finite(rhs) || lhs <= rhs) {
+        return(list(
+            subset = mask,
+            node = i_star,
+            best_parent_set = p_star_idx,
+            competitor_parent_set = p_risk,
+            s_best = best_score,
+            s_competitor = aflml[i_star, p_risk],
+            lower_best = lower_delta[i_star, p_star_idx],
+            upper_competitor = upper_delta[i_star, p_risk],
+            lhs = lhs,
+            rhs = rhs,
+            parent_gap = best_score - aflml[i_star, p_risk],
+            required_gap = upper_delta[i_star, p_risk] - lower_delta[i_star, p_star_idx],
+            type = "parent"
+        ))
+    }
+    NULL
+}
+
+# Sound CPDAG-stability certificate (see stability_findings_and_redesign.md, 3.1).
+# Uses asymmetric-tight bounds Lg/Ug/LF/UF plus the local delta bounds.
+sm_cpdag_certificate <- function(aflml, bps, F, ifm, lower_delta, upper_delta,
+                                 Lg, Ug, LF, UF, dag, n.nodes, eps = 1e-9) {
+    bit <- 2^(seq_len(n.nodes) - 1)
+    base_key <- sm_cpdag_key(dag)
+
+    # Condition 1: the optimal Markov equivalence class must be a single CPDAG.
+    enum <- sm_enumerate_optimal_dags(aflml, bps, F, n.nodes, eps)
+    cpdag_keys <- vapply(enum$dags, sm_cpdag_key, character(1))
+    optimal_cpdag_unique <- (!enum$truncated) && length(cpdag_keys) > 0 &&
+        all(cpdag_keys == base_key)
+    skel_keys <- unique(vapply(enum$dags, function(d) paste(sm_skeleton(d), collapse = ""), character(1)))
+    vs_keys <- unique(vapply(enum$dags, function(d) paste(sm_vstructures(d), collapse = ","), character(1)))
+
+    # Conditions 2 & 3 over the union of all optimal-order subsets.
+    vis <- sm_optimal_visited(aflml, bps, F, n.nodes, eps)
+    sink_fragile <- list()
+    parent_fragile <- list()
+
+    for (S in vis$subsets) {
+        info <- vis$winfo[[S + 1]]
+        nodes <- info$nodes
+        winners <- info$winners
+
+        # Condition 2: no strict competitor (original gap > 0) may be promoted
+        # above the whole tied winner group after any single removal.
+        if (length(nodes) >= 2 && length(winners) < length(nodes)) {
+            lhs <- -Inf
+            for (w in winners) {
+                U <- bitXor(S, bit[w])
+                A_w <- F[U + 1] + aflml[w, bps[w, U + 1]]
+                LA_w <- LF[U + 1] + Lg[w, U + 1]
+                val <- A_w + LA_w
+                if (val > lhs) lhs <- val
+            }
+            strict <- setdiff(nodes, winners)
+            rhs <- -Inf
+            j_risk <- NA_integer_
+            for (j in strict) {
+                U <- bitXor(S, bit[j])
+                A_j <- F[U + 1] + aflml[j, bps[j, U + 1]]
+                UA_j <- UF[U + 1] + Ug[j, U + 1]
+                val <- A_j + UA_j
+                if (val > rhs) {
+                    rhs <- val
+                    j_risk <- j
+                }
+            }
+            if (!is.finite(lhs) || !is.finite(rhs) || lhs <= rhs) {
+                sink_fragile[[length(sink_fragile) + 1]] <- list(
+                    subset = S,
+                    winners = winners,
+                    competitor = j_risk,
+                    lhs = lhs,
+                    rhs = rhs,
+                    gap = lhs - rhs,
+                    type = "sink_cpdag"
+                )
+            }
+        }
+
+        # Condition 3: family/parent decision stable for each optimal winner.
+        for (w in winners) {
+            U <- bitXor(S, bit[w])
+            wt <- sm_asym_parent_witness(w, U, S, aflml, bps, ifm, lower_delta, upper_delta)
+            if (!is.null(wt)) {
+                parent_fragile[[length(parent_fragile) + 1]] <- wt
+            }
+        }
+    }
+
+    stable_cpdag <- optimal_cpdag_unique &&
+        length(sink_fragile) == 0 && length(parent_fragile) == 0
+
+    list(
+        stable_cpdag = stable_cpdag,
+        optimal_cpdag_unique = optimal_cpdag_unique,
+        skeleton_unique_among_optima = length(skel_keys) == 1,
+        vstructures_unique_among_optima = length(vs_keys) == 1,
+        n_optimal_dags = length(enum$dags),
+        enumeration_truncated = enum$truncated,
+        sink_fragile = sink_fragile,
+        parent_fragile = parent_fragile,
+        witnesses = c(sink_fragile, parent_fragile),
+        base_cpdag_key = base_key
+    )
+}
+
 sm_stability_bdeu <- function(
     data,
     node.sizes,
@@ -21,14 +296,19 @@ sm_stability_bdeu <- function(
     sinks,
     F,
     ifm,
+    dag = NULL,
+    target = c("cpdag", "dag"),
     bound.type = c("cons", "tight", "asym_cons", "asym_tight"),
     scope = c("path", "all")) {
+    target <- match.arg(target)
     bound.type <- match.arg(bound.type)
     scope <- match.arg(scope)
 
-    if (scope != "path") {
+    if (target == "dag" && scope != "path") {
         stop("stability.scope = 'all' not yet implemented.")
     }
+
+    n.nodes <- ncol(data)
 
     bounds <- .Call(
         "bnstruct_bdeu_loo_bounds",
@@ -38,6 +318,33 @@ sm_stability_bdeu <- function(
 
     lower_delta <- bounds$lower
     upper_delta <- bounds$upper
+
+    # CPDAG (Markov equivalence class) certificate. Certifies invariance of the
+    # skeleton and v-structures rather than the (unidentifiable) oriented DAG.
+    if (target == "cpdag") {
+        if (is.null(dag)) {
+            stop("target = 'cpdag' requires the learned dag.")
+        }
+        g_bounds <- .Call(
+            "bnstruct_compute_lg_ug_tight",
+            aflml, bps, lower_delta, upper_delta, ifm,
+            PACKAGE = "bnstruct"
+        )
+        f_bounds <- .Call(
+            "bnstruct_compute_lf_uf",
+            F, sinks, bps, aflml, g_bounds$lower, g_bounds$upper,
+            PACKAGE = "bnstruct"
+        )
+        cert <- sm_cpdag_certificate(
+            aflml, bps, F, ifm, lower_delta, upper_delta,
+            g_bounds$lower, g_bounds$upper, f_bounds$lower, f_bounds$upper,
+            dag, n.nodes
+        )
+        cert$target <- "cpdag"
+        cert$bound_type <- "asym_tight"
+        cert$scope <- scope
+        return(cert)
+    }
 
     is_asym <- bound.type %in% c("asym_cons", "asym_tight")
     is_tight <- bound.type %in% c("tight", "asym_tight")
