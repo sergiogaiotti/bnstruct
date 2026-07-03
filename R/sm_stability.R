@@ -358,6 +358,69 @@ sm_cpdag_certificate <- function(aflml, bps, F, ifm, lower_delta, upper_delta,
     )
 }
 
+# Recover the exact SM-optimal DAG from a family-score table (BDeu, encoded by
+# the same importance-family mask). Mirrors the core of sm().
+sm_optimal_dag_from_aflml <- function(aflml, ifm) {
+    bps <- .Call("bnstruct_fbp", aflml = aflml, PACKAGE = "bnstruct")
+    sinks <- .Call("bnstruct_fbs", bps = bps, aflml = aflml, PACKAGE = "bnstruct")
+    order <- find.best.ordering(sinks)
+    parents <- find.best.network(order, bps)
+    parents.to.dag(parents)
+}
+
+# Exact incremental leave-one-out CPDAG certificate. For every observation o,
+# recompute the SM optimum on D \ {o} under the same constraints (ifm) and score
+# (BDeu), and compare its CPDAG (skeleton + v-structures) to the base CPDAG.
+# This is necessary and sufficient (no bound slack) and, as a by-product, returns
+# the structurally influential observations and what each of them changes.
+sm_loo_exact_cpdag <- function(data, node.sizes, ess, ifm, dag) {
+    n <- nrow(data)
+    base_key <- sm_cpdag_key(dag)
+    base_skel <- sm_skeleton(dag)
+    base_vs <- sm_vstructures(dag)
+
+    influential <- list()
+    n_skeleton_changes <- 0L
+    n_vstructure_changes <- 0L
+
+    for (o in seq_len(n)) {
+        aflml_o <- .Call(
+            "bnstruct_all_fam_log_marg_lik",
+            data[-o, , drop = FALSE], node.sizes, ifm, ess, 0L,
+            PACKAGE = "bnstruct"
+        )
+        dag_o <- sm_optimal_dag_from_aflml(aflml_o, ifm)
+
+        if (sm_cpdag_key(dag_o) != base_key) {
+            skel_o <- sm_skeleton(dag_o)
+            vs_o <- sm_vstructures(dag_o)
+            skel_changed <- !identical(skel_o, base_skel)
+            vs_changed <- !identical(vs_o, base_vs)
+            if (skel_changed) n_skeleton_changes <- n_skeleton_changes + 1L
+            if (vs_changed) n_vstructure_changes <- n_vstructure_changes + 1L
+            influential[[length(influential) + 1]] <- list(
+                obs = o,
+                skeleton_changed = skel_changed,
+                vstructures_changed = vs_changed,
+                added_vstructures = setdiff(vs_o, base_vs),
+                removed_vstructures = setdiff(base_vs, vs_o)
+            )
+        }
+    }
+
+    list(
+        stable_cpdag = length(influential) == 0,
+        target = "cpdag",
+        mode = "exact",
+        n_obs = n,
+        n_influential = length(influential),
+        n_skeleton_changes = n_skeleton_changes,
+        n_vstructure_changes = n_vstructure_changes,
+        influential = influential,
+        base_cpdag_key = base_key
+    )
+}
+
 sm_stability_bdeu <- function(
     data,
     node.sizes,
@@ -369,9 +432,11 @@ sm_stability_bdeu <- function(
     ifm,
     dag = NULL,
     target = c("cpdag", "dag"),
+    mode = c("bound", "exact"),
     bound.type = c("cons", "tight", "asym_cons", "asym_tight"),
     scope = c("path", "all")) {
     target <- match.arg(target)
+    mode <- match.arg(mode)
     bound.type <- match.arg(bound.type)
     scope <- match.arg(scope)
 
@@ -396,6 +461,16 @@ sm_stability_bdeu <- function(
         if (is.null(dag)) {
             stop("target = 'cpdag' requires the learned dag.")
         }
+
+        # Exact incremental leave-one-out: re-run the SM optimum on D \ {o} for
+        # every row and compare CPDAGs. Necessary and sufficient (no bound slack)
+        # and yields the list of structurally influential observations.
+        if (mode == "exact") {
+            cert <- sm_loo_exact_cpdag(data, node.sizes, ess, ifm, dag)
+            cert$scope <- scope
+            return(cert)
+        }
+
         g_bounds <- .Call(
             "bnstruct_compute_lg_ug_tight",
             aflml, bps, lower_delta, upper_delta, ifm,

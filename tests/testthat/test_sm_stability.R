@@ -128,6 +128,55 @@ test_that("coupled parent margin certifies a strongly dependent 2-node CPDAG", {
 })
 
 
+test_that("exact CPDAG mode matches the brute-force leave-one-out oracle", {
+    set.seed(21)
+    N <- 150
+    p <- 3
+    X <- matrix(0L, N, p)
+    X[, 1] <- ifelse(runif(N) < 0.65, 1L, 2L)
+    for (j in 2:p) X[, j] <- ifelse(runif(N) < 0.9, X[, j - 1], 3L - X[, j - 1])
+    storage.mode(X) <- "integer"
+    ns <- rep(2L, p)
+
+    exact <- bnstruct:::sm(X, ns, stability = TRUE, stability.target = "cpdag", stability.mode = "exact")$stability
+    expect_equal(exact$mode, "exact")
+
+    base_key <- sm_cpdag_key(bnstruct:::sm(X, ns))
+    brute_stable <- all(vapply(
+        seq_len(N),
+        function(i) sm_cpdag_key(bnstruct:::sm(X[-i, , drop = FALSE], ns)) == base_key,
+        logical(1)
+    ))
+    # exact certificate is necessary AND sufficient: it must equal the oracle
+    expect_equal(exact$stable_cpdag, brute_stable)
+    expect_equal(exact$n_influential == 0, brute_stable)
+})
+
+
+test_that("exact mode flags a structurally influential observation", {
+    # a near-tie dataset so that removing one specific row flips the skeleton
+    set.seed(4)
+    N <- 700
+    p <- 3
+    X <- matrix(0L, N, p)
+    X[, 1] <- ifelse(runif(N) < 0.65, 1L, 2L)
+    for (j in 2:p) X[, j] <- ifelse(runif(N) < 0.92, X[, j - 1], 3L - X[, j - 1])
+    storage.mode(X) <- "integer"
+    ns <- rep(2L, p)
+
+    st <- bnstruct:::sm(X, ns, stability = TRUE, stability.target = "cpdag", stability.mode = "exact")$stability
+    expect_false(st$stable_cpdag)
+    expect_true(st$n_influential >= 1)
+    # each influential record points at a real row and reports what changed
+    obs <- vapply(st$influential, function(w) w$obs, integer(1))
+    expect_true(all(obs >= 1 & obs <= N))
+    # removing a flagged row really does change the CPDAG
+    base_key <- sm_cpdag_key(bnstruct:::sm(X, ns))
+    o <- st$influential[[1]]$obs
+    expect_false(sm_cpdag_key(bnstruct:::sm(X[-o, , drop = FALSE], ns)) == base_key)
+})
+
+
 test_that("oriented-DAG certificate is sound: certified => all LOO DAGs invariant", {
     res <- bnstruct:::sm(sm_small_data, sm_small_sizes,
         stability = TRUE, stability.target = "dag", stability.bound = "asym_tight"

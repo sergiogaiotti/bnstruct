@@ -13,6 +13,7 @@ sm <- function(x, node.sizes, scoring.func = 0, cont.nodes = NULL, max.fanin = N
                layering = NULL, max.fanin.layers = NULL, ess = 1, cpc.mat = NULL,
                mandatory.edges = NULL, stability = FALSE,
                stability.target = c("cpdag", "dag"),
+               stability.mode = c("bound", "exact"),
                stability.bound = c("cons", "tight", "asym_cons", "asym_tight"),
                stability.scope = c("path", "all"),
                return.tables = FALSE) {
@@ -23,6 +24,7 @@ sm <- function(x, node.sizes, scoring.func = 0, cont.nodes = NULL, max.fanin = N
     storage.mode(scoring.func) <- "integer"
 
     stability.target <- match.arg(stability.target)
+    stability.mode <- match.arg(stability.mode)
     stability.bound <- match.arg(stability.bound)
     stability.scope <- match.arg(stability.scope)
 
@@ -158,6 +160,7 @@ sm <- function(x, node.sizes, scoring.func = 0, cont.nodes = NULL, max.fanin = N
             ifm = ifm,
             dag = dag,
             target = stability.target,
+            mode = stability.mode,
             bound.type = stability.bound,
             scope = stability.scope
         )
