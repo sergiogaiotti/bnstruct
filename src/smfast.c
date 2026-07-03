@@ -353,6 +353,247 @@ SEXP bnstruct_bdeu_loo_bounds(SEXP data, SEXP node_sizes, SEXP imp_fam_mask, SEX
 	return res;
 }
 
+/*
+ * Incremental exact leave-one-out: recover, for every removed observation, the
+ * optimal parent set of every node WITHOUT recomputing the family scores from
+ * scratch. The full-data family scores (aflml) are supplied; a removal shifts
+ * each family score by the closed-form delta of the single contingency cell the
+ * removed row occupies (precomputed once per cell), after which only the cheap
+ * SM dynamic program is re-run. Total cost O(N * p * 2^p) instead of the naive
+ * O(N^2 * ...) that re-counts for every row.
+ *
+ * Returns an integer matrix [n_ex, n_nodes]; entry [o, i] is the 0-indexed
+ * parent-set bitmask of node i in the optimal DAG for D \ {row o}.
+ */
+SEXP bnstruct_loo_parents(SEXP data, SEXP node_sizes, SEXP imp_fam_mask, SEXP ess, SEXP aflml_sexp)
+{
+	unsigned int i, k;
+	R_len_t s;
+	unsigned int *d = (unsigned int *)INTEGER(data);
+	unsigned int n_nodes = ncols(data);
+	unsigned int n_ex = nrows(data);
+	unsigned int *ns = (unsigned int *)INTEGER(node_sizes);
+	unsigned int *ifm = (unsigned int *)INTEGER(imp_fam_mask);
+	unsigned int pow_nodes = ncols(imp_fam_mask);
+	double alpha = *(REAL(ess));
+	double *aflml = REAL(aflml_sexp);
+	unsigned int *pa = (unsigned int *)R_alloc(n_nodes, sizeof(unsigned int));
+	unsigned int mask1 = 1;
+	R_xlen_t nfam = (R_xlen_t)n_nodes * pow_nodes;
+
+	/* ---- Phase 1: per-cell removal deltas for every feasible family ---- */
+	R_xlen_t *offset = (R_xlen_t *)R_alloc(nfam, sizeof(R_xlen_t));
+	R_xlen_t total = 0;
+	for (s = 0; s < (R_len_t)pow_nodes; s++)
+		for (i = 0; i < n_nodes; i++)
+		{
+			R_xlen_t pos = (R_xlen_t)s * n_nodes + i;
+			if (!ifm[pos])
+			{
+				offset[pos] = -1;
+				continue;
+			}
+			unsigned int npa = get_bits(s, pa, n_nodes);
+			R_xlen_t q = 1;
+			for (k = 0; k < npa; k++)
+				q *= ns[pa[k]];
+			offset[pos] = total;
+			total += q * ns[i];
+		}
+
+	double *cell_delta = (double *)R_alloc(total > 0 ? total : 1, sizeof(double));
+	for (R_xlen_t t = 0; t < total; t++)
+		cell_delta[t] = 0.0;
+
+	for (s = 0; s < (R_len_t)pow_nodes; s++)
+		for (i = 0; i < n_nodes; i++)
+		{
+			R_xlen_t pos = (R_xlen_t)s * n_nodes + i;
+			if (offset[pos] < 0)
+				continue;
+			unsigned int npa = get_bits(s, pa, n_nodes);
+			int r_i = ns[i];
+			int cum[npa + 2];
+			int strides[npa + 1];
+			int q = 1;
+			cum[0] = 1;
+			cum[1] = r_i;
+			for (k = 0; k < npa; k++)
+			{
+				cum[k + 2] = cum[k + 1] * ns[pa[k]];
+				q *= ns[pa[k]];
+			}
+			strides[0] = i * n_ex;
+			for (k = 0; k < npa; k++)
+				strides[k + 1] = pa[k] * n_ex;
+
+			int ncells = q * r_i;
+			double *counts = (double *)calloc(ncells, sizeof(double));
+			if (counts == NULL)
+				error("memory allocation failed in bnstruct_loo_parents");
+
+			unsigned int ex;
+			for (ex = 0; ex < n_ex; ex++)
+			{
+				int index = 0;
+				unsigned int jj;
+				int bad = 0;
+				for (jj = 0; jj < npa + 1; jj++)
+				{
+					int elmt = d[ex + strides[jj]];
+					if (elmt == NA_INTEGER)
+					{
+						bad = 1;
+						break;
+					}
+					index += (elmt - 1) * cum[jj];
+				}
+				if (bad)
+					continue;
+				counts[index] += 1;
+			}
+
+			double a_ij = alpha / (double)q;
+			double a_ijk = alpha / (double)(q * r_i);
+			int pc;
+			for (pc = 0; pc < q; pc++)
+			{
+				int base = pc * r_i;
+				double n_ij = 0.0;
+				for (k = 0; k < (unsigned int)r_i; k++)
+					n_ij += counts[base + k];
+				if (n_ij < 1.0)
+					continue;
+				for (k = 0; k < (unsigned int)r_i; k++)
+				{
+					double n_ijk = counts[base + k];
+					if (n_ijk < 1.0)
+						continue;
+					cell_delta[offset[pos] + base + k] =
+						log(a_ij + n_ij - 1.0) - log(a_ijk + n_ijk - 1.0);
+				}
+			}
+			free(counts);
+		}
+
+	/* ---- Phase 2: per removed row, shift scores and re-run the SM DP ---- */
+	SEXP res;
+	PROTECT(res = allocMatrix(INTSXP, n_ex, n_nodes));
+	int *out = INTEGER(res);
+	{
+		R_xlen_t t;
+		for (t = 0; t < (R_xlen_t)n_ex * n_nodes; t++)
+			out[t] = 0;
+	}
+
+	double *A = (double *)R_alloc(nfam, sizeof(double));
+	int *bps = (int *)R_alloc(nfam, sizeof(int));
+	double *bss = (double *)R_alloc(nfam, sizeof(double));
+	int *sinks = (int *)R_alloc(pow_nodes, sizeof(int));
+	double *fsc = (double *)R_alloc(pow_nodes, sizeof(double));
+
+	unsigned int o;
+	for (o = 0; o < n_ex; o++)
+	{
+		R_xlen_t t;
+		for (t = 0; t < nfam; t++)
+			A[t] = aflml[t];
+
+		/* shift each feasible family by the delta of row o's cell */
+		for (s = 0; s < (R_len_t)pow_nodes; s++)
+			for (i = 0; i < n_nodes; i++)
+			{
+				R_xlen_t pos = (R_xlen_t)s * n_nodes + i;
+				if (offset[pos] < 0)
+					continue;
+				unsigned int npa = get_bits(s, pa, n_nodes);
+				int r_i = ns[i];
+				int cum[npa + 2];
+				cum[0] = 1;
+				cum[1] = r_i;
+				for (k = 0; k < npa; k++)
+					cum[k + 2] = cum[k + 1] * ns[pa[k]];
+				int index = 0;
+				int bad = 0;
+				int ei = d[o + i * n_ex];
+				if (ei == NA_INTEGER)
+					bad = 1;
+				else
+					index += (ei - 1) * cum[0];
+				for (k = 0; k < npa && !bad; k++)
+				{
+					int ev = d[o + pa[k] * n_ex];
+					if (ev == NA_INTEGER)
+					{
+						bad = 1;
+						break;
+					}
+					index += (ev - 1) * cum[k + 1];
+				}
+				if (bad)
+					continue;
+				A[pos] += cell_delta[offset[pos] + index];
+			}
+
+		/* find best parents: bss[i,s] = max_{P subset s} A[i,P] */
+		for (i = 0; i < n_nodes; i++)
+			for (s = 0; s < (R_len_t)pow_nodes; s++)
+			{
+				R_xlen_t pos = (R_xlen_t)s * n_nodes + i;
+				if (s & (mask1 << i))
+					continue;
+				bps[pos] = (int)s + 1;
+				bss[pos] = A[pos];
+				unsigned int bi;
+				for (bi = 0; bi < n_nodes; bi++)
+					if (s & (mask1 << bi))
+					{
+						R_xlen_t pos2 = (R_xlen_t)(s ^ (mask1 << bi)) * n_nodes + i;
+						if (bss[pos2] > bss[pos])
+						{
+							bps[pos] = bps[pos2];
+							bss[pos] = bss[pos2];
+						}
+					}
+			}
+
+		/* find best sinks */
+		for (s = 0; s < (R_len_t)pow_nodes; s++)
+			sinks[s] = -1;
+		fsc[0] = 0.0;
+		for (s = 1; s < (R_len_t)pow_nodes; s++)
+		{
+			double best = R_NegInf;
+			for (i = 0; i < n_nodes; i++)
+				if (s & (mask1 << i))
+				{
+					unsigned int nop = s ^ (mask1 << i);
+					double sk = fsc[nop] + bss[(R_xlen_t)nop * n_nodes + i];
+					if (sinks[s] == -1 || sk > best)
+					{
+						best = sk;
+						sinks[s] = (int)i;
+					}
+				}
+			fsc[s] = best;
+		}
+
+		/* backtrack to parent sets */
+		unsigned int S = pow_nodes - 1;
+		while (S > 0)
+		{
+			int sink = sinks[S];
+			unsigned int nop = S ^ (mask1 << sink);
+			int ps = bps[(R_xlen_t)nop * n_nodes + sink];
+			out[o + (R_xlen_t)sink * n_ex] = ps - 1;
+			S = nop;
+		}
+	}
+
+	UNPROTECT(1);
+	return res;
+}
+
 SEXP bnstruct_compute_bg_cons(SEXP lower, SEXP upper, SEXP imp_fam_mask)
 {
 	R_len_t ni, si, bi, pos, pos2;

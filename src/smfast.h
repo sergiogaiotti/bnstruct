@@ -39,6 +39,9 @@ SEXP bnstruct_compute_lg_ug_tight(SEXP aflml, SEXP bps, SEXP lower, SEXP upper, 
 /* compute asymmetric LF/UF bounds over subsets */
 SEXP bnstruct_compute_lf_uf(SEXP F, SEXP sinks, SEXP bps, SEXP aflml, SEXP Lg, SEXP Ug);
 
+/* incremental exact leave-one-out: optimal parent sets per removed observation */
+SEXP bnstruct_loo_parents(SEXP data, SEXP node_sizes, SEXP imp_fam_mask, SEXP ess, SEXP aflml);
+
 /* compute BF bounds over subsets */
 SEXP bnstruct_compute_bf(SEXP Bg);
 

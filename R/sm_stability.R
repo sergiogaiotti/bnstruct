@@ -368,28 +368,40 @@ sm_optimal_dag_from_aflml <- function(aflml, ifm) {
     parents.to.dag(parents)
 }
 
-# Exact incremental leave-one-out CPDAG certificate. For every observation o,
-# recompute the SM optimum on D \ {o} under the same constraints (ifm) and score
-# (BDeu), and compare its CPDAG (skeleton + v-structures) to the base CPDAG.
-# This is necessary and sufficient (no bound slack) and, as a by-product, returns
-# the structurally influential observations and what each of them changes.
-sm_loo_exact_cpdag <- function(data, node.sizes, ess, ifm, dag) {
+# Exact incremental leave-one-out CPDAG certificate. For every observation o, the
+# optimal DAG on D \ {o} is recovered by the C routine bnstruct_loo_parents, which
+# shifts the full-data family scores by the closed-form delta of the single cell
+# row o occupies and re-runs only the SM dynamic program (no re-counting). Its
+# CPDAG (skeleton + v-structures) is then compared to the base CPDAG. Necessary
+# and sufficient (no bound slack); also returns the structurally influential
+# observations and what each of them changes.
+sm_loo_exact_cpdag <- function(data, node.sizes, ess, ifm, dag, aflml) {
     n <- nrow(data)
+    p <- ncol(data)
     base_key <- sm_cpdag_key(dag)
     base_skel <- sm_skeleton(dag)
     base_vs <- sm_vstructures(dag)
+
+    # parents_mat[o, i] = 0-indexed parent-set bitmask of node i in the optimum for D \ {o}
+    parents_mat <- .Call(
+        "bnstruct_loo_parents",
+        data, node.sizes, ifm, ess, aflml,
+        PACKAGE = "bnstruct"
+    )
+    bit <- 2^(seq_len(p) - 1)
 
     influential <- list()
     n_skeleton_changes <- 0L
     n_vstructure_changes <- 0L
 
     for (o in seq_len(n)) {
-        aflml_o <- .Call(
-            "bnstruct_all_fam_log_marg_lik",
-            data[-o, , drop = FALSE], node.sizes, ifm, ess, 0L,
-            PACKAGE = "bnstruct"
-        )
-        dag_o <- sm_optimal_dag_from_aflml(aflml_o, ifm)
+        dag_o <- matrix(0L, p, p)
+        for (i in seq_len(p)) {
+            pm <- parents_mat[o, i]
+            if (pm > 0) {
+                dag_o[which(bitAnd(pm, bit) > 0), i] <- 1L
+            }
+        }
 
         if (sm_cpdag_key(dag_o) != base_key) {
             skel_o <- sm_skeleton(dag_o)
@@ -466,7 +478,7 @@ sm_stability_bdeu <- function(
         # every row and compare CPDAGs. Necessary and sufficient (no bound slack)
         # and yields the list of structurally influential observations.
         if (mode == "exact") {
-            cert <- sm_loo_exact_cpdag(data, node.sizes, ess, ifm, dag)
+            cert <- sm_loo_exact_cpdag(data, node.sizes, ess, ifm, dag, aflml)
             cert$scope <- scope
             return(cert)
         }

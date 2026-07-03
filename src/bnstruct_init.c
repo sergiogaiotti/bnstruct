@@ -20,6 +20,7 @@ extern SEXP bnstruct_compute_bg_tight(SEXP, SEXP, SEXP, SEXP, SEXP);
 extern SEXP bnstruct_compute_lg_ug_cons(SEXP, SEXP, SEXP, SEXP);
 extern SEXP bnstruct_compute_lg_ug_tight(SEXP, SEXP, SEXP, SEXP, SEXP);
 extern SEXP bnstruct_compute_lf_uf(SEXP, SEXP, SEXP, SEXP, SEXP, SEXP);
+extern SEXP bnstruct_loo_parents(SEXP, SEXP, SEXP, SEXP, SEXP);
 extern SEXP bnstruct_compute_bf(SEXP);
 extern SEXP bnstruct_fumt_mask(SEXP, SEXP);
 extern SEXP bnstruct_g2_stat(SEXP, SEXP);
@@ -53,6 +54,7 @@ static const R_CallMethodDef CallEntries[] = {
     {"bnstruct_compute_lg_ug_cons", (DL_FUNC)&bnstruct_compute_lg_ug_cons, 4},
     {"bnstruct_compute_lg_ug_tight", (DL_FUNC)&bnstruct_compute_lg_ug_tight, 5},
     {"bnstruct_compute_lf_uf", (DL_FUNC)&bnstruct_compute_lf_uf, 6},
+    {"bnstruct_loo_parents", (DL_FUNC)&bnstruct_loo_parents, 5},
     {"bnstruct_compute_bf", (DL_FUNC)&bnstruct_compute_bf, 1},
     {"bnstruct_fumt_mask", (DL_FUNC)&bnstruct_fumt_mask, 2},
     {"bnstruct_g2_stat", (DL_FUNC)&bnstruct_g2_stat, 2},
