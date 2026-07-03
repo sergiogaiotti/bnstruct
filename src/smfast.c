@@ -433,6 +433,197 @@ SEXP bnstruct_compute_bg_tight(SEXP aflml, SEXP bps, SEXP lower, SEXP upper, SEX
 	return res;
 }
 
+SEXP bnstruct_compute_lg_ug_cons(SEXP bps, SEXP lower, SEXP upper, SEXP imp_fam_mask)
+{
+	R_len_t ni, si, bi, pos, pos2;
+	R_len_t n_nodes = nrows(lower);
+	R_len_t pow_nodes = ncols(lower);
+	R_len_t mask = 1;
+	int *ifm = INTEGER(imp_fam_mask);
+	int *ps = INTEGER(bps);
+	double *low = REAL(lower);
+	double *up = REAL(upper);
+	SEXP res, lower_sexp, upper_sexp, names;
+
+	PROTECT(res = allocVector(VECSXP, 2));
+	PROTECT(lower_sexp = allocMatrix(REALSXP, n_nodes, pow_nodes));
+	PROTECT(upper_sexp = allocMatrix(REALSXP, n_nodes, pow_nodes));
+	PROTECT(names = allocVector(STRSXP, 2));
+
+	SET_STRING_ELT(names, 0, mkChar("lower"));
+	SET_STRING_ELT(names, 1, mkChar("upper"));
+	setAttrib(res, R_NamesSymbol, names);
+
+	double *lg = REAL(lower_sexp);
+	double *ug = REAL(upper_sexp);
+
+	for (ni = 0; ni < n_nodes; ni++)
+	{
+		double *max_upper = (double *)R_alloc(pow_nodes, sizeof(double));
+
+		for (si = 0; si < pow_nodes; si++)
+		{
+			pos = si * n_nodes + ni;
+			max_upper[si] = ifm[pos] ? up[pos] : R_NegInf;
+		}
+
+		for (si = 0; si < pow_nodes; si++)
+			for (bi = 0; bi < n_nodes; bi++)
+				if (si & (mask << bi))
+				{
+					pos2 = (si ^ (mask << bi));
+					if (max_upper[pos2] > max_upper[si])
+						max_upper[si] = max_upper[pos2];
+				}
+
+		for (si = 0; si < pow_nodes; si++)
+		{
+			pos = si * n_nodes + ni;
+			int p_star = ps[pos];
+			int p_star_pos = (p_star - 1) * n_nodes + ni;
+			lg[pos] = low[p_star_pos];
+			ug[pos] = max_upper[si];
+		}
+	}
+
+	SET_VECTOR_ELT(res, 0, lower_sexp);
+	SET_VECTOR_ELT(res, 1, upper_sexp);
+
+	UNPROTECT(4);
+	return res;
+}
+
+SEXP bnstruct_compute_lg_ug_tight(SEXP aflml, SEXP bps, SEXP lower, SEXP upper, SEXP imp_fam_mask)
+{
+	R_len_t ni, si, bi, pos, pos2;
+	R_len_t n_nodes = nrows(aflml);
+	R_len_t pow_nodes = ncols(aflml);
+	R_len_t mask = 1;
+	int *ifm = INTEGER(imp_fam_mask);
+	int *ps = INTEGER(bps);
+	double *ml = REAL(aflml);
+	double *low = REAL(lower);
+	double *up = REAL(upper);
+	SEXP res, lower_sexp, upper_sexp, names;
+
+	PROTECT(res = allocVector(VECSXP, 2));
+	PROTECT(lower_sexp = allocMatrix(REALSXP, n_nodes, pow_nodes));
+	PROTECT(upper_sexp = allocMatrix(REALSXP, n_nodes, pow_nodes));
+	PROTECT(names = allocVector(STRSXP, 2));
+
+	SET_STRING_ELT(names, 0, mkChar("lower"));
+	SET_STRING_ELT(names, 1, mkChar("upper"));
+	setAttrib(res, R_NamesSymbol, names);
+
+	double *lg = REAL(lower_sexp);
+	double *ug = REAL(upper_sexp);
+
+	for (ni = 0; ni < n_nodes; ni++)
+	{
+		double *max_val = (double *)R_alloc(pow_nodes, sizeof(double));
+
+		for (si = 0; si < pow_nodes; si++)
+		{
+			pos = si * n_nodes + ni;
+			if (ifm[pos])
+				max_val[si] = ml[pos] + up[pos];
+			else
+				max_val[si] = R_NegInf;
+		}
+
+		for (si = 0; si < pow_nodes; si++)
+			for (bi = 0; bi < n_nodes; bi++)
+				if (si & (mask << bi))
+				{
+					pos2 = (si ^ (mask << bi));
+					if (max_val[pos2] > max_val[si])
+						max_val[si] = max_val[pos2];
+				}
+
+		for (si = 0; si < pow_nodes; si++)
+		{
+			pos = si * n_nodes + ni;
+			int p_star = ps[pos];
+			int p_star_pos = (p_star - 1) * n_nodes + ni;
+			double s_star = ml[p_star_pos];
+			lg[pos] = low[p_star_pos];
+			ug[pos] = max_val[si] - s_star;
+		}
+	}
+
+	SET_VECTOR_ELT(res, 0, lower_sexp);
+	SET_VECTOR_ELT(res, 1, upper_sexp);
+
+	UNPROTECT(4);
+	return res;
+}
+
+SEXP bnstruct_compute_lf_uf(SEXP F, SEXP sinks, SEXP bps, SEXP aflml, SEXP Lg, SEXP Ug)
+{
+	R_len_t si, sink, nop;
+	R_len_t n_nodes = nrows(aflml);
+	R_len_t pow_nodes = ncols(aflml);
+	R_len_t mask = 1;
+	SEXP res, lower_sexp, upper_sexp, names;
+
+	int *sinks_p = INTEGER(sinks);
+	int *ps = INTEGER(bps);
+	double *ml = REAL(aflml);
+	double *f = REAL(F);
+	double *lg = REAL(Lg);
+	double *ug = REAL(Ug);
+
+	PROTECT(res = allocVector(VECSXP, 2));
+	PROTECT(lower_sexp = allocVector(REALSXP, pow_nodes));
+	PROTECT(upper_sexp = allocVector(REALSXP, pow_nodes));
+	PROTECT(names = allocVector(STRSXP, 2));
+
+	SET_STRING_ELT(names, 0, mkChar("lower"));
+	SET_STRING_ELT(names, 1, mkChar("upper"));
+	setAttrib(res, R_NamesSymbol, names);
+
+	double *lf = REAL(lower_sexp);
+	double *uf = REAL(upper_sexp);
+
+	for (si = 0; si < pow_nodes; si++)
+	{
+		lf[si] = R_NegInf;
+		uf[si] = R_NegInf;
+	}
+	lf[0] = 0.0;
+	uf[0] = 0.0;
+
+	for (si = 1; si < pow_nodes; si++)
+	{
+		sink = sinks_p[si] - 1;
+		if (sink < 0)
+			continue;
+		nop = si ^ (mask << sink);
+		lf[si] = lf[nop] + lg[nop * n_nodes + sink];
+
+		double max_uf = R_NegInf;
+		R_len_t i;
+		for (i = 0; i < n_nodes; i++)
+			if (si & (mask << i))
+			{
+				R_len_t u = si ^ (mask << i);
+				int p_star = ps[u * n_nodes + i];
+				double A = f[u] + ml[(p_star - 1) * n_nodes + i];
+				double UA = uf[u] + ug[u * n_nodes + i];
+				double cand = A - f[si] + UA;
+				if (cand > max_uf)
+					max_uf = cand;
+			}
+		uf[si] = max_uf;
+	}
+
+	SET_VECTOR_ELT(res, 0, lower_sexp);
+	SET_VECTOR_ELT(res, 1, upper_sexp);
+
+	UNPROTECT(4);
+	return res;
+}
+
 SEXP bnstruct_compute_bf(SEXP Bg)
 {
 	R_len_t si, sink, nop;

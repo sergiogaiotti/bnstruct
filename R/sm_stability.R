@@ -21,7 +21,7 @@ sm_stability_bdeu <- function(
     sinks,
     F,
     ifm,
-    bound.type = c("cons", "tight"),
+    bound.type = c("cons", "tight", "asym_cons", "asym_tight"),
     scope = c("path", "all")) {
     bound.type <- match.arg(bound.type)
     scope <- match.arg(scope)
@@ -39,27 +39,58 @@ sm_stability_bdeu <- function(
     lower_delta <- bounds$lower
     upper_delta <- bounds$upper
 
-    if (bound.type == "cons") {
-        Bg <- .Call(
-            "bnstruct_compute_bg_cons",
-            lower_delta, upper_delta, ifm,
+    is_asym <- bound.type %in% c("asym_cons", "asym_tight")
+    is_tight <- bound.type %in% c("tight", "asym_tight")
+
+    if (!is_asym) {
+        if (bound.type == "cons") {
+            Bg <- .Call(
+                "bnstruct_compute_bg_cons",
+                lower_delta, upper_delta, ifm,
+                PACKAGE = "bnstruct"
+            )
+        } else {
+            Bg <- .Call(
+                "bnstruct_compute_bg_tight",
+                aflml, bps, lower_delta, upper_delta, ifm,
+                PACKAGE = "bnstruct"
+            )
+        }
+
+        BF <- .Call(
+            "bnstruct_compute_bf",
+            Bg,
             PACKAGE = "bnstruct"
         )
+
+        blocal <- pmax(abs(lower_delta), abs(upper_delta))
     } else {
-        Bg <- .Call(
-            "bnstruct_compute_bg_tight",
-            aflml, bps, lower_delta, upper_delta, ifm,
+        if (bound.type == "asym_cons") {
+            g_bounds <- .Call(
+                "bnstruct_compute_lg_ug_cons",
+                bps, lower_delta, upper_delta, ifm,
+                PACKAGE = "bnstruct"
+            )
+        } else {
+            g_bounds <- .Call(
+                "bnstruct_compute_lg_ug_tight",
+                aflml, bps, lower_delta, upper_delta, ifm,
+                PACKAGE = "bnstruct"
+            )
+        }
+
+        Lg <- g_bounds$lower
+        Ug <- g_bounds$upper
+
+        f_bounds <- .Call(
+            "bnstruct_compute_lf_uf",
+            F, sinks, bps, aflml, Lg, Ug,
             PACKAGE = "bnstruct"
         )
+
+        LF <- f_bounds$lower
+        UF <- f_bounds$upper
     }
-
-    BF <- .Call(
-        "bnstruct_compute_bf",
-        Bg,
-        PACKAGE = "bnstruct"
-    )
-
-    blocal <- pmax(abs(lower_delta), abs(upper_delta))
 
     n.nodes <- ncol(data)
     bitmask <- 2^(seq_len(n.nodes) - 1)
@@ -79,21 +110,63 @@ sm_stability_bdeu <- function(
 
         if (length(nodes) >= 2) {
             A_vals <- numeric(length(nodes))
-            BA_vals <- numeric(length(nodes))
+
+            if (is_asym) {
+                LA_vals <- numeric(length(nodes))
+                UA_vals <- numeric(length(nodes))
+            } else {
+                BA_vals <- numeric(length(nodes))
+            }
 
             for (idx in seq_along(nodes)) {
                 i <- nodes[idx]
                 U_mask <- bitXor(mask, bitmask[i])
                 u_idx <- U_mask + 1
                 A_vals[idx] <- F[u_idx] + aflml[i, bps[i, u_idx]]
-                BA_vals[idx] <- BF[u_idx] + Bg[i, u_idx]
+
+                if (is_asym) {
+                    LA_vals[idx] <- LF[u_idx] + Lg[i, u_idx]
+                    UA_vals[idx] <- UF[u_idx] + Ug[i, u_idx]
+                } else {
+                    BA_vals[idx] <- BF[u_idx] + Bg[i, u_idx]
+                }
             }
 
             idx_star <- which(nodes == i_star)
             if (length(idx_star) == 1) {
                 comp_idx <- setdiff(seq_along(nodes), idx_star)
                 if (length(comp_idx) > 0) {
-                    if (bound.type == "tight") {
+                    if (is_asym) {
+                        risk_vals <- A_vals[comp_idx] + UA_vals[comp_idx]
+                        if (any(is.finite(risk_vals))) {
+                            risk_idx <- comp_idx[which.max(risk_vals)]
+
+                            A_star <- A_vals[idx_star]
+                            LA_star <- LA_vals[idx_star]
+                            UA_star <- UA_vals[idx_star]
+                            lhs <- A_star + LA_star
+                            rhs <- A_vals[risk_idx] + UA_vals[risk_idx]
+
+                            if (!is.finite(lhs) || !is.finite(rhs) || lhs <= rhs) {
+                                sink_failures[[length(sink_failures) + 1]] <- list(
+                                    subset = mask,
+                                    chosen = i_star,
+                                    competitor = nodes[risk_idx],
+                                    A_chosen = A_star,
+                                    A_competitor = A_vals[risk_idx],
+                                    LA_chosen = LA_star,
+                                    UA_chosen = UA_star,
+                                    LA_competitor = LA_vals[risk_idx],
+                                    UA_competitor = UA_vals[risk_idx],
+                                    lhs = lhs,
+                                    rhs = rhs,
+                                    gap = A_star - A_vals[risk_idx],
+                                    required_gap = UA_vals[risk_idx] - LA_star,
+                                    type = "sink"
+                                )
+                            }
+                        }
+                    } else if (is_tight) {
                         risk_vals <- A_vals[comp_idx] + BA_vals[comp_idx]
                         risk_idx <- comp_idx[which.max(risk_vals)]
 
@@ -151,7 +224,52 @@ sm_stability_bdeu <- function(
         best_score <- aflml[i_star, p_star_idx]
 
         if (is.finite(best_score)) {
-            if (bound.type == "tight") {
+            if (is_asym) {
+                max_risk <- -Inf
+                p_risk <- NA_integer_
+
+                p_mask <- U_mask
+                repeat {
+                    p_idx <- p_mask + 1
+                    if (ifm[i_star, p_idx] && p_idx != p_star_idx) {
+                        risk <- aflml[i_star, p_idx] + upper_delta[i_star, p_idx]
+                        if (risk > max_risk) {
+                            max_risk <- risk
+                            p_risk <- p_idx
+                        }
+                    }
+
+                    if (p_mask == 0) {
+                        break
+                    }
+                    p_mask <- bitAnd(p_mask - 1, U_mask)
+                }
+
+                if (is.finite(max_risk)) {
+                    lhs <- best_score + lower_delta[i_star, p_star_idx]
+                    rhs <- max_risk
+                    parent_gap <- best_score - aflml[i_star, p_risk]
+                    required_gap <- upper_delta[i_star, p_risk] - lower_delta[i_star, p_star_idx]
+
+                    if (!is.finite(lhs) || !is.finite(rhs) || lhs <= rhs) {
+                        parent_failures[[length(parent_failures) + 1]] <- list(
+                            subset = mask,
+                            node = i_star,
+                            best_parent_set = p_star_idx,
+                            competitor_parent_set = p_risk,
+                            s_best = best_score,
+                            s_competitor = aflml[i_star, p_risk],
+                            lower_best = lower_delta[i_star, p_star_idx],
+                            upper_competitor = upper_delta[i_star, p_risk],
+                            lhs = lhs,
+                            rhs = rhs,
+                            parent_gap = parent_gap,
+                            required_gap = required_gap,
+                            type = "parent"
+                        )
+                    }
+                }
+            } else if (is_tight) {
                 max_risk <- -Inf
                 p_risk <- NA_integer_
 

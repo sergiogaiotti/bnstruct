@@ -30,6 +30,15 @@ SEXP bnstruct_compute_bg_cons(SEXP lower, SEXP upper, SEXP imp_fam_mask);
 /* compute tight Bg bounds */
 SEXP bnstruct_compute_bg_tight(SEXP aflml, SEXP bps, SEXP lower, SEXP upper, SEXP imp_fam_mask);
 
+/* compute asymmetric Lg/Ug bounds (conservative) */
+SEXP bnstruct_compute_lg_ug_cons(SEXP bps, SEXP lower, SEXP upper, SEXP imp_fam_mask);
+
+/* compute asymmetric Lg/Ug bounds (tight) */
+SEXP bnstruct_compute_lg_ug_tight(SEXP aflml, SEXP bps, SEXP lower, SEXP upper, SEXP imp_fam_mask);
+
+/* compute asymmetric LF/UF bounds over subsets */
+SEXP bnstruct_compute_lf_uf(SEXP F, SEXP sinks, SEXP bps, SEXP aflml, SEXP Lg, SEXP Ug);
+
 /* compute BF bounds over subsets */
 SEXP bnstruct_compute_bf(SEXP Bg);
 

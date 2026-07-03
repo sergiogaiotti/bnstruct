@@ -12,7 +12,7 @@
 sm <- function(x, node.sizes, scoring.func = 0, cont.nodes = NULL, max.fanin = NULL,
                layering = NULL, max.fanin.layers = NULL, ess = 1, cpc.mat = NULL,
                mandatory.edges = NULL, stability = FALSE,
-               stability.bound = c("cons", "tight"),
+               stability.bound = c("cons", "tight", "asym_cons", "asym_tight"),
                stability.scope = c("path", "all"),
                return.tables = FALSE) {
     n.cases <- nrow(x)
