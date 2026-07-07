@@ -390,11 +390,21 @@ sm_loo_exact_cpdag <- function(data, node.sizes, ess, ifm, dag, aflml) {
     )
     bit <- 2^(seq_len(p) - 1)
 
+    # Base parent-set bitmask per node. If a row's parent vector equals this, the
+    # DAG is byte-identical, hence the CPDAG is identical: skip the (comparatively
+    # expensive) v-structure / CPDAG-key computation. Only rows whose parent vector
+    # actually changed are examined further. This is exact, not a heuristic prune.
+    base_pm <- vapply(seq_len(p), function(i) {
+        pa <- which(dag[, i] == 1L)
+        if (length(pa) == 0) 0L else as.integer(sum(bit[pa]))
+    }, integer(1))
+    changed_rows <- which(!apply(parents_mat, 1, function(r) all(r == base_pm)))
+
     influential <- list()
     n_skeleton_changes <- 0L
     n_vstructure_changes <- 0L
 
-    for (o in seq_len(n)) {
+    for (o in changed_rows) {
         dag_o <- matrix(0L, p, p)
         for (i in seq_len(p)) {
             pm <- parents_mat[o, i]
