@@ -16,6 +16,7 @@ sm <- function(x, node.sizes, scoring.func = 0, cont.nodes = NULL, max.fanin = N
                stability.mode = c("bound", "exact"),
                stability.bound = c("cons", "tight", "asym_cons", "asym_tight"),
                stability.scope = c("path", "all"),
+               stability.diagnostics = FALSE,
                return.tables = FALSE) {
     n.cases <- nrow(x)
     n.nodes <- ncol(x)
@@ -162,7 +163,8 @@ sm <- function(x, node.sizes, scoring.func = 0, cont.nodes = NULL, max.fanin = N
             target = stability.target,
             mode = stability.mode,
             bound.type = stability.bound,
-            scope = stability.scope
+            scope = stability.scope,
+            diagnostics = stability.diagnostics
         )
 
         return(list(

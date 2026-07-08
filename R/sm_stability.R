@@ -248,27 +248,33 @@ sm_coupled_parent_witness <- function(i_star, U_mask, mask, aflml, bps, ifm,
         p_mask <- bitAnd(p_mask - 1, U_mask)
     }
 
-    if (is.finite(worst_margin) && worst_margin <= 0) {
-        return(list(
-            subset = mask,
-            node = i_star,
-            best_parent_set = p_star_idx,
-            competitor_parent_set = p_risk,
-            s_best = best_score,
-            s_competitor = aflml[i_star, p_risk],
-            coupled_term = coupled_at_risk,
-            margin = worst_margin,
-            type = "parent"
-        ))
+    # Always return the decision record (with its margin and a `fragile` flag), so
+    # the diagnostic layer can read margins even for certified decisions. The caller
+    # records only fragile ones into parent_fragile. NULL means "no decision here"
+    # (e.g. the winning family is infeasible or has no competitor).
+    if (!is.finite(worst_margin)) {
+        return(NULL)
     }
-    NULL
+    list(
+        subset = mask,
+        node = i_star,
+        best_parent_set = p_star_idx,
+        competitor_parent_set = p_risk,
+        s_best = best_score,
+        s_competitor = aflml[i_star, p_risk],
+        coupled_term = coupled_at_risk,
+        margin = worst_margin,
+        fragile = worst_margin <= 0,
+        type = "parent"
+    )
 }
 
 # Sound CPDAG-stability certificate (see stability_findings_and_redesign.md, 3.1).
 # Uses asymmetric-tight bounds Lg/Ug/LF/UF plus the coupled local delta bounds.
 sm_cpdag_certificate <- function(aflml, bps, F, ifm, lower_delta, upper_delta,
                                  lower_k, upper_k, node.sizes,
-                                 Lg, Ug, LF, UF, dag, n.nodes, eps = 1e-9) {
+                                 Lg, Ug, LF, UF, dag, n.nodes, eps = 1e-9,
+                                 diagnostics = FALSE) {
     bit <- 2^(seq_len(n.nodes) - 1)
     base_key <- sm_cpdag_key(dag)
 
@@ -284,6 +290,11 @@ sm_cpdag_certificate <- function(aflml, bps, F, ifm, lower_delta, upper_delta,
     vis <- sm_optimal_visited(aflml, bps, F, n.nodes, eps)
     sink_fragile <- list()
     parent_fragile <- list()
+    # Diagnostic records (only populated when diagnostics = TRUE). These reuse the
+    # margins the certificate already computes, so the extra cost is O(1) per
+    # decision; the default path stores nothing.
+    sink_diag <- if (diagnostics) list() else NULL
+    parent_diag <- if (diagnostics) list() else NULL
 
     for (S in vis$subsets) {
         info <- vis$winfo[[S + 1]]
@@ -294,24 +305,27 @@ sm_cpdag_certificate <- function(aflml, bps, F, ifm, lower_delta, upper_delta,
         # above the whole tied winner group after any single removal.
         if (length(nodes) >= 2 && length(winners) < length(nodes)) {
             lhs <- -Inf
+            A_wbest <- NA_real_
+            LA_wbest <- NA_real_
             for (w in winners) {
                 U <- bitXor(S, bit[w])
                 A_w <- F[U + 1] + aflml[w, bps[w, U + 1]]
                 LA_w <- LF[U + 1] + Lg[w, U + 1]
                 val <- A_w + LA_w
-                if (val > lhs) lhs <- val
+                if (val > lhs) { lhs <- val; A_wbest <- A_w; LA_wbest <- LA_w }
             }
             strict <- setdiff(nodes, winners)
             rhs <- -Inf
             j_risk <- NA_integer_
+            A_jrisk <- NA_real_; UF_r <- NA_real_; Ug_r <- NA_real_
             for (j in strict) {
                 U <- bitXor(S, bit[j])
                 A_j <- F[U + 1] + aflml[j, bps[j, U + 1]]
-                UA_j <- UF[U + 1] + Ug[j, U + 1]
-                val <- A_j + UA_j
+                UF_j <- UF[U + 1]; Ug_j <- Ug[j, U + 1]
+                val <- A_j + UF_j + Ug_j
                 if (val > rhs) {
-                    rhs <- val
-                    j_risk <- j
+                    rhs <- val; j_risk <- j
+                    A_jrisk <- A_j; UF_r <- UF_j; Ug_r <- Ug_j
                 }
             }
             if (!is.finite(lhs) || !is.finite(rhs) || lhs <= rhs) {
@@ -325,6 +339,15 @@ sm_cpdag_certificate <- function(aflml, bps, F, ifm, lower_delta, upper_delta,
                     type = "sink_cpdag"
                 )
             }
+            # sink-margin anatomy: margin = base_gap + LA_win - (UF + Ug)
+            if (diagnostics) {
+                sink_diag[[length(sink_diag) + 1]] <- data.frame(
+                    subset = S, competitor = j_risk,
+                    margin = lhs - rhs,
+                    base_gap = A_wbest - A_jrisk,
+                    UF = UF_r, Ug = Ug_r, LA_win = LA_wbest
+                )
+            }
         }
 
         # Condition 3: family/parent decision stable for each optimal winner
@@ -336,7 +359,14 @@ sm_cpdag_certificate <- function(aflml, bps, F, ifm, lower_delta, upper_delta,
                 lower_k, upper_k, lower_delta, upper_delta
             )
             if (!is.null(wt)) {
-                parent_fragile[[length(parent_fragile) + 1]] <- wt
+                if (isTRUE(wt$fragile)) {
+                    parent_fragile[[length(parent_fragile) + 1]] <- wt
+                }
+                if (diagnostics) {
+                    parent_diag[[length(parent_diag) + 1]] <- data.frame(
+                        subset = S, node = w, margin = wt$margin
+                    )
+                }
             }
         }
     }
@@ -344,7 +374,7 @@ sm_cpdag_certificate <- function(aflml, bps, F, ifm, lower_delta, upper_delta,
     stable_cpdag <- optimal_cpdag_unique &&
         length(sink_fragile) == 0 && length(parent_fragile) == 0
 
-    list(
+    out <- list(
         stable_cpdag = stable_cpdag,
         optimal_cpdag_unique = optimal_cpdag_unique,
         skeleton_unique_among_optima = length(skel_keys) == 1,
@@ -356,6 +386,23 @@ sm_cpdag_certificate <- function(aflml, bps, F, ifm, lower_delta, upper_delta,
         witnesses = c(sink_fragile, parent_fragile),
         base_cpdag_key = base_key
     )
+
+    if (diagnostics) {
+        sink_df <- if (length(sink_diag)) do.call(rbind, sink_diag) else NULL
+        parent_df <- if (length(parent_diag)) do.call(rbind, parent_diag) else NULL
+        min_sink <- if (!is.null(sink_df)) min(sink_df$margin) else Inf
+        min_parent <- if (!is.null(parent_df)) min(parent_df$margin) else Inf
+        binding <- if (min_sink == Inf && min_parent == Inf) "none" else
+            if (min_sink <= min_parent) "sink" else "parent"
+        out$diagnostics <- list(
+            sink = sink_df,
+            parent = parent_df,
+            min_sink_margin = min_sink,
+            min_parent_margin = min_parent,
+            binding = binding
+        )
+    }
+    out
 }
 
 # Recover the exact SM-optimal DAG from a family-score table (BDeu, encoded by
@@ -456,7 +503,8 @@ sm_stability_bdeu <- function(
     target = c("cpdag", "dag"),
     mode = c("bound", "exact"),
     bound.type = c("cons", "tight", "asym_cons", "asym_tight"),
-    scope = c("path", "all")) {
+    scope = c("path", "all"),
+    diagnostics = FALSE) {
     target <- match.arg(target)
     mode <- match.arg(mode)
     bound.type <- match.arg(bound.type)
@@ -507,7 +555,7 @@ sm_stability_bdeu <- function(
             aflml, bps, F, ifm, lower_delta, upper_delta,
             bounds$lower_k, bounds$upper_k, node.sizes,
             g_bounds$lower, g_bounds$upper, f_bounds$lower, f_bounds$upper,
-            dag, n.nodes
+            dag, n.nodes, diagnostics = diagnostics
         )
         cert$target <- "cpdag"
         cert$bound_type <- "asym_tight"
