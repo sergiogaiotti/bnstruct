@@ -12,12 +12,10 @@ SEXP bnstruct_score_node( SEXP data, SEXP node_sizes, SEXP ni, SEXP pars, SEXP f
                                           *INTEGER(ni), (unsigned int *)INTEGER(pars), length(pars), *REAL(ess) );
              break;
                 
-    case 1 : *REAL(score) = log_likelihood( (unsigned int *)INTEGER(data), ncols(data), nrows(data), (unsigned int *)INTEGER(node_sizes),
-                                              *INTEGER(ni), (unsigned int *)INTEGER(pars), length(pars), 0.5*log(nrows(data)) );
-             break;
-    
+    // func = 1 -> AIC, func = 2 -> BIC (penalty computed inside log_likelihood)
+    case 1 :
     case 2 : *REAL(score) = log_likelihood( (unsigned int *)INTEGER(data), ncols(data), nrows(data), (unsigned int *)INTEGER(node_sizes),
-                                              *INTEGER(ni), (unsigned int *)INTEGER(pars), length(pars), 1.0 );
+                                              *INTEGER(ni), (unsigned int *)INTEGER(pars), length(pars), (int)(*REAL(func)) );
              break;
   }
   
@@ -40,12 +38,10 @@ double score_node_1( unsigned int* data, int ncols_data, int nrows_data, unsigne
                                  ni, (unsigned int *)pars, length_pars, ess );
              break;
                 
-    case 1 : score = log_likelihood( (unsigned int *)data, ncols_data, nrows_data, (unsigned int *)node_sizes,
-                                     ni, (unsigned int *)pars, length_pars, 0.5*log(nrows_data) );
-             break;
-    
+    // func = 1 -> AIC, func = 2 -> BIC (penalty computed inside log_likelihood)
+    case 1 :
     case 2 : score = log_likelihood( (unsigned int *)data, ncols_data, nrows_data, (unsigned int *)node_sizes,
-                                     ni, (unsigned int *)pars, length_pars, 1.0 );
+                                     ni, (unsigned int *)pars, length_pars, func );
              break;
   }
 
@@ -288,8 +284,8 @@ SEXP bnstruct_compute_counts( SEXP data, SEXP node_sizes )
  * LL(G|D) - f(|D|)|B| 
  * |B| = \sum_{i=1}^{|V|} (r_i - 1) * q_i
  */
-double log_likelihood ( unsigned int * d, unsigned int n_nodes, unsigned int n_cases, unsigned int * ns, 
-  unsigned int ni, unsigned int * pa, unsigned int n_pa, double penalty )
+double log_likelihood ( unsigned int * d, unsigned int n_nodes, unsigned int n_cases, unsigned int * ns,
+  unsigned int ni, unsigned int * pa, unsigned int n_pa, int func )
 {
 	int i, j, index, elmt, stride;
 	double acc, logl;
@@ -340,31 +336,48 @@ double log_likelihood ( unsigned int * d, unsigned int n_nodes, unsigned int n_c
 	//for( i = 0; i < prod_sizes; i++ )
 	//	counts[i] += n_na * (counts[i] + prior) / ( n_cases - n_na + alpha );
 		
-	// compute log likelihood
+	// compute log likelihood: sum_{j,k} n_ijk * log( n_ijk / n_ij ),
+	// with the 0 * log 0 = 0 convention. n_complete counts the rows that are
+	// complete for this family; it is the sample size the BIC penalty refers to,
+	// so that with missing data the score and its leave-one-out deltas stay
+	// consistent (removing a row that is NA in this family leaves it unchanged).
   logl = 0.0;
-	
+	double n_complete = 0.0;
+
 	for( i = 0; i < prod_sizes_pa; i++ )
 	{
 		stride = i * ns[ni];
-		acc    = counts[stride];
-    
-		for( j = 1; j < ns[ni]; j++ )
+		acc    = 0.0;
+
+		for( j = 0; j < ns[ni]; j++ )
     {
 			acc  += counts[stride + j];
     }
-    
-    acc = log(acc + 1);
-    
-    for ( j = 1 ; j < ns[ni] ; j++ )
+
+    if( acc < 1.0 )
+      continue;
+
+    n_complete += acc;
+    acc = log(acc);
+
+    for ( j = 0 ; j < ns[ni] ; j++ )
     {
-      logl += counts[stride + j] * (log(counts[stride + j] + 1) - acc);
+      if( counts[stride + j] >= 1.0 )
+        logl += counts[stride + j] * (log(counts[stride + j]) - acc);
     }
 
 	}
-  
-  logl -= penalty * prod_sizes_pa * (ns[ni] - 1);
-  
+
+  // penalty: func = 1 -> AIC (coefficient 1), func = 2 -> BIC (0.5 * log N)
+  if( func == 2 )
+  {
+    if( n_complete >= 1.0 )
+      logl -= 0.5 * log(n_complete) * prod_sizes_pa * (ns[ni] - 1);
+  }
+  else
+    logl -= (double)prod_sizes_pa * (ns[ni] - 1);
+
   free( counts );
-	
+
 	return logl;
 }

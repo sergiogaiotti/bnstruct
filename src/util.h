@@ -30,9 +30,10 @@ double bdeu_score( unsigned int * d, unsigned int n_nodes, unsigned int n_cases,
 	unsigned int ni, unsigned int * pa, unsigned int n_pa, double alpha );
   
 /**
- * log likelihood
+ * penalized log likelihood; func = 1 -> AIC penalty (dim), func = 2 -> BIC
+ * penalty (dim/2 * log N, with N the family's complete-case row count)
  */
-double log_likelihood( unsigned int * d, unsigned int n_nodes, unsigned int n_cases, unsigned int * ns, 
-  unsigned int ni, unsigned int * pa, unsigned int n_pa, double penalty );
+double log_likelihood( unsigned int * d, unsigned int n_nodes, unsigned int n_cases, unsigned int * ns,
+  unsigned int ni, unsigned int * pa, unsigned int n_pa, int func );
 	
 #endif
