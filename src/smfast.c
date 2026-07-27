@@ -167,9 +167,26 @@ SEXP bnstruct_fbs_with_scores(SEXP bps, SEXP aflml)
 	return (res);
 }
 
-SEXP bnstruct_bdeu_loo_bounds(SEXP data, SEXP node_sizes, SEXP imp_fam_mask, SEXP ess)
+/* f(x) = x log x - (x-1) log(x-1), the per-cell term of the BIC/AIC removal
+ * delta (0 log 0 = 0, so f(1) = 0). The log-likelihood part of removing one
+ * row from cell (j,k) is f(n_ij) - f(n_ijk). */
+static double loo_f_cell(double x)
+{
+	double v = x * log(x);
+	if (x > 1.0)
+		v -= (x - 1.0) * log(x - 1.0);
+	return v;
+}
+
+/* Per-family min/max (and per-child-value min/max) of the one-row removal
+ * delta, for the scoring function selected by func: 0 = BDeu, 1 = AIC,
+ * 2 = BIC. The BIC penalty uses the family's complete-case row count, matching
+ * log_likelihood(); its N -> N-1 relief term is row-independent within the
+ * family, and is zero for AIC (no N in the penalty) and for BDeu. */
+SEXP bnstruct_score_loo_bounds(SEXP data, SEXP node_sizes, SEXP imp_fam_mask, SEXP ess, SEXP func)
 {
 	unsigned int i, j, n_pa, pos;
+	int scoring_func = *INTEGER(func);
 
 	// get inputs
 	unsigned int *d = (unsigned int *)INTEGER(data);
@@ -263,7 +280,7 @@ SEXP bnstruct_bdeu_loo_bounds(SEXP data, SEXP node_sizes, SEXP imp_fam_mask, SEX
 
 			double *counts = (double *)calloc(prod_sizes, sizeof(double));
 			if (counts == NULL)
-				error("memory allocation failed in bnstruct_bdeu_loo_bounds");
+				error("memory allocation failed in bnstruct_score_loo_bounds");
 
 			unsigned int r_i = ns[i];
 			double alpha_ij = alpha / (double)prod_sizes_pa;
@@ -280,6 +297,15 @@ SEXP bnstruct_bdeu_loo_bounds(SEXP data, SEXP node_sizes, SEXP imp_fam_mask, SEX
 				up_k_local[k] = R_NegInf;
 			}
 
+			// n_k_incomplete[k]: rows with child value k that are incomplete for
+			// this family (NA in some parent). Removing such a row leaves the
+			// family score unchanged (delta 0), so 0 must be included in the
+			// per-k (and global) delta bounds whenever such rows exist.
+			double n_k_incomplete[r_i];
+			int n_child_na = 0;
+			for (k = 0; k < (int)r_i; k++)
+				n_k_incomplete[k] = 0.0;
+
 			for (ex = 0; ex < n_ex; ex++)
 			{
 				int index = 0;
@@ -293,10 +319,27 @@ SEXP bnstruct_bdeu_loo_bounds(SEXP data, SEXP node_sizes, SEXP imp_fam_mask, SEX
 					index += (elmt - 1) * cum_prod_sizes[jj];
 				}
 				if (jj < n_pa + 1)
+				{
+					int child = d[ex + strides[0]];
+					if (child == NA_INTEGER)
+						n_child_na++;
+					else
+						n_k_incomplete[child - 1] += 1.0;
 					continue;
+				}
 
 				counts[index] += 1;
 			}
+
+			// family complete-case count and the BIC penalty-relief term,
+			// constant over the family's admissible removals
+			double n_fam = 0.0;
+			for (k = 0; k < prod_sizes; k++)
+				n_fam += counts[k];
+			double pen_relief = 0.0;
+			if (scoring_func == 2 && n_fam >= 2.0)
+				pen_relief = 0.5 * (double)prod_sizes_pa * (double)(r_i - 1) *
+							 log(n_fam / (n_fam - 1.0));
 
 			for (pc = 0; pc < prod_sizes_pa; pc++)
 			{
@@ -311,7 +354,11 @@ SEXP bnstruct_bdeu_loo_bounds(SEXP data, SEXP node_sizes, SEXP imp_fam_mask, SEX
 					double n_ijk = counts[base + k];
 					if (n_ijk < 1.0)
 						continue;
-					double delta = log(alpha_ij + n_ij - 1.0) - log(alpha_ijk + n_ijk - 1.0);
+					double delta;
+					if (scoring_func == 0)
+						delta = log(alpha_ij + n_ij - 1.0) - log(alpha_ijk + n_ijk - 1.0);
+					else
+						delta = loo_f_cell(n_ij) - loo_f_cell(n_ijk) + pen_relief;
 					if (delta < min_delta)
 						min_delta = delta;
 					if (delta > max_delta)
@@ -329,6 +376,27 @@ SEXP bnstruct_bdeu_loo_bounds(SEXP data, SEXP node_sizes, SEXP imp_fam_mask, SEX
 				min_delta = 0.0;
 				max_delta = 0.0;
 			}
+
+			// removals of rows incomplete for this family shift its score by 0
+			if (n_child_na > 0)
+			{
+				if (min_delta > 0.0)
+					min_delta = 0.0;
+				if (max_delta < 0.0)
+					max_delta = 0.0;
+			}
+			for (k = 0; k < (int)r_i; k++)
+				if (n_k_incomplete[k] > 0.0)
+				{
+					if (low_k_local[k] > 0.0)
+						low_k_local[k] = 0.0;
+					if (up_k_local[k] < 0.0)
+						up_k_local[k] = 0.0;
+					if (min_delta > 0.0)
+						min_delta = 0.0;
+					if (max_delta < 0.0)
+						max_delta = 0.0;
+				}
 
 			lower[pos] = min_delta;
 			upper[pos] = max_delta;
@@ -353,6 +421,16 @@ SEXP bnstruct_bdeu_loo_bounds(SEXP data, SEXP node_sizes, SEXP imp_fam_mask, SEX
 	return res;
 }
 
+/* backward-compatible BDeu entry point */
+SEXP bnstruct_bdeu_loo_bounds(SEXP data, SEXP node_sizes, SEXP imp_fam_mask, SEXP ess)
+{
+	SEXP func, res;
+	PROTECT(func = ScalarInteger(0));
+	res = bnstruct_score_loo_bounds(data, node_sizes, imp_fam_mask, ess, func);
+	UNPROTECT(1);
+	return res;
+}
+
 /*
  * Incremental exact leave-one-out: recover, for every removed observation, the
  * optimal parent set of every node WITHOUT recomputing the family scores from
@@ -365,7 +443,7 @@ SEXP bnstruct_bdeu_loo_bounds(SEXP data, SEXP node_sizes, SEXP imp_fam_mask, SEX
  * Returns an integer matrix [n_ex, n_nodes]; entry [o, i] is the 0-indexed
  * parent-set bitmask of node i in the optimal DAG for D \ {row o}.
  */
-SEXP bnstruct_loo_parents(SEXP data, SEXP node_sizes, SEXP imp_fam_mask, SEXP ess, SEXP aflml_sexp)
+SEXP bnstruct_loo_parents_score(SEXP data, SEXP node_sizes, SEXP imp_fam_mask, SEXP ess, SEXP aflml_sexp, SEXP func)
 {
 	unsigned int i, k;
 	R_len_t s;
@@ -376,6 +454,7 @@ SEXP bnstruct_loo_parents(SEXP data, SEXP node_sizes, SEXP imp_fam_mask, SEXP es
 	unsigned int *ifm = (unsigned int *)INTEGER(imp_fam_mask);
 	unsigned int pow_nodes = ncols(imp_fam_mask);
 	double alpha = *(REAL(ess));
+	int scoring_func = *INTEGER(func);
 	double *aflml = REAL(aflml_sexp);
 	unsigned int *pa = (unsigned int *)R_alloc(n_nodes, sizeof(unsigned int));
 	unsigned int mask1 = 1;
@@ -455,6 +534,15 @@ SEXP bnstruct_loo_parents(SEXP data, SEXP node_sizes, SEXP imp_fam_mask, SEXP es
 
 			double a_ij = alpha / (double)q;
 			double a_ijk = alpha / (double)(q * r_i);
+
+			double n_fam = 0.0;
+			for (k = 0; k < (unsigned int)ncells; k++)
+				n_fam += counts[k];
+			double pen_relief = 0.0;
+			if (scoring_func == 2 && n_fam >= 2.0)
+				pen_relief = 0.5 * (double)q * (double)(r_i - 1) *
+							 log(n_fam / (n_fam - 1.0));
+
 			int pc;
 			for (pc = 0; pc < q; pc++)
 			{
@@ -470,7 +558,9 @@ SEXP bnstruct_loo_parents(SEXP data, SEXP node_sizes, SEXP imp_fam_mask, SEXP es
 					if (n_ijk < 1.0)
 						continue;
 					cell_delta[offset[pos] + base + k] =
-						log(a_ij + n_ij - 1.0) - log(a_ijk + n_ijk - 1.0);
+						(scoring_func == 0)
+							? log(a_ij + n_ij - 1.0) - log(a_ijk + n_ijk - 1.0)
+							: loo_f_cell(n_ij) - loo_f_cell(n_ijk) + pen_relief;
 				}
 			}
 			free(counts);
@@ -499,41 +589,46 @@ SEXP bnstruct_loo_parents(SEXP data, SEXP node_sizes, SEXP imp_fam_mask, SEXP es
 		for (t = 0; t < nfam; t++)
 			A[t] = aflml[t];
 
-		/* shift each feasible family by the delta of row o's cell */
+		/* Shift each feasible family by the delta of row o's cell.
+		 *
+		 * The parent-configuration index
+		 *     pc = sum_k (x_{pa[k]} - 1) * prod_{l<k} r_{pa[l]}
+		 * depends only on the candidate set s and the row, NOT on the child i,
+		 * and phase 1 laid the cells out as [offset + pc * r_i + (child - 1)].
+		 * So the bit list and pc are computed once per (row, s) rather than once
+		 * per (row, s, i), leaving O(1) work in the innermost loop. */
 		for (s = 0; s < (R_len_t)pow_nodes; s++)
+		{
+			unsigned int npa = get_bits(s, pa, n_nodes);
+			int pc = 0;
+			int pcstride = 1;
+			int bad = 0;
+			for (k = 0; k < npa; k++)
+			{
+				int ev = d[o + pa[k] * n_ex];
+				if (ev == NA_INTEGER)
+				{
+					bad = 1;
+					break;
+				}
+				pc += (ev - 1) * pcstride;
+				pcstride *= ns[pa[k]];
+			}
+			/* row incomplete in this candidate set: every family (i, s) shifts by 0 */
+			if (bad)
+				continue;
+
 			for (i = 0; i < n_nodes; i++)
 			{
 				R_xlen_t pos = (R_xlen_t)s * n_nodes + i;
 				if (offset[pos] < 0)
 					continue;
-				unsigned int npa = get_bits(s, pa, n_nodes);
-				int r_i = ns[i];
-				int cum[npa + 2];
-				cum[0] = 1;
-				cum[1] = r_i;
-				for (k = 0; k < npa; k++)
-					cum[k + 2] = cum[k + 1] * ns[pa[k]];
-				int index = 0;
-				int bad = 0;
 				int ei = d[o + i * n_ex];
 				if (ei == NA_INTEGER)
-					bad = 1;
-				else
-					index += (ei - 1) * cum[0];
-				for (k = 0; k < npa && !bad; k++)
-				{
-					int ev = d[o + pa[k] * n_ex];
-					if (ev == NA_INTEGER)
-					{
-						bad = 1;
-						break;
-					}
-					index += (ev - 1) * cum[k + 1];
-				}
-				if (bad)
 					continue;
-				A[pos] += cell_delta[offset[pos] + index];
+				A[pos] += cell_delta[offset[pos] + (R_xlen_t)pc * ns[i] + (ei - 1)];
 			}
+		}
 
 		/* find best parents: bss[i,s] = max_{P subset s} A[i,P] */
 		for (i = 0; i < n_nodes; i++)
@@ -590,6 +685,16 @@ SEXP bnstruct_loo_parents(SEXP data, SEXP node_sizes, SEXP imp_fam_mask, SEXP es
 		}
 	}
 
+	UNPROTECT(1);
+	return res;
+}
+
+/* backward-compatible BDeu entry point */
+SEXP bnstruct_loo_parents(SEXP data, SEXP node_sizes, SEXP imp_fam_mask, SEXP ess, SEXP aflml_sexp)
+{
+	SEXP func, res;
+	PROTECT(func = ScalarInteger(0));
+	res = bnstruct_loo_parents_score(data, node_sizes, imp_fam_mask, ess, aflml_sexp, func);
 	UNPROTECT(1);
 	return res;
 }
@@ -774,6 +879,18 @@ SEXP bnstruct_compute_lg_ug_cons(SEXP bps, SEXP lower, SEXP upper, SEXP imp_fam_
 		{
 			pos = si * n_nodes + ni;
 			int p_star = ps[pos];
+			/* bnstruct_fbp leaves bps = 0 for candidate sets containing the node
+			 * itself; those (i, U) entries are never read back (U = S \ {i} by
+			 * construction), but indexing with p_star - 1 = -1 would read before
+			 * the array. Note this is NOT the same as !ifm[pos]: a set excluded by
+			 * max.fanin/layering still has a valid bps (the best feasible subset)
+			 * and a meaningful Lg/Ug. */
+			if (p_star == 0)
+			{
+				lg[pos] = R_NegInf;
+				ug[pos] = R_NegInf;
+				continue;
+			}
 			int p_star_pos = (p_star - 1) * n_nodes + ni;
 			lg[pos] = low[p_star_pos];
 			ug[pos] = max_upper[si];
@@ -838,6 +955,15 @@ SEXP bnstruct_compute_lg_ug_tight(SEXP aflml, SEXP bps, SEXP lower, SEXP upper, 
 		{
 			pos = si * n_nodes + ni;
 			int p_star = ps[pos];
+			/* see bnstruct_compute_lg_ug_cons: bps = 0 marks a candidate set that
+			 * contains the node itself, for which p_star - 1 would index before the
+			 * array. Such entries are never read back. */
+			if (p_star == 0)
+			{
+				lg[pos] = R_NegInf;
+				ug[pos] = R_NegInf;
+				continue;
+			}
 			int p_star_pos = (p_star - 1) * n_nodes + ni;
 			double s_star = ml[p_star_pos];
 			lg[pos] = low[p_star_pos];

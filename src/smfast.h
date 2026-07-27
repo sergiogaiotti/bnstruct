@@ -23,6 +23,7 @@ SEXP bnstruct_all_fam_log_marg_lik(SEXP data, SEXP node_sizes, SEXP imp_fam_mask
 
 /* compute BDeu leave-one-out bounds for all families */
 SEXP bnstruct_bdeu_loo_bounds(SEXP data, SEXP node_sizes, SEXP imp_fam_mask, SEXP ess);
+SEXP bnstruct_score_loo_bounds(SEXP data, SEXP node_sizes, SEXP imp_fam_mask, SEXP ess, SEXP func);
 
 /* compute conservative Bg bounds */
 SEXP bnstruct_compute_bg_cons(SEXP lower, SEXP upper, SEXP imp_fam_mask);
@@ -41,6 +42,7 @@ SEXP bnstruct_compute_lf_uf(SEXP F, SEXP sinks, SEXP bps, SEXP aflml, SEXP Lg, S
 
 /* incremental exact leave-one-out: optimal parent sets per removed observation */
 SEXP bnstruct_loo_parents(SEXP data, SEXP node_sizes, SEXP imp_fam_mask, SEXP ess, SEXP aflml);
+SEXP bnstruct_loo_parents_score(SEXP data, SEXP node_sizes, SEXP imp_fam_mask, SEXP ess, SEXP aflml, SEXP func);
 
 /* compute BF bounds over subsets */
 SEXP bnstruct_compute_bf(SEXP Bg);
