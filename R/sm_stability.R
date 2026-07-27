@@ -53,8 +53,35 @@ sm_cpdag_key <- function(dag) {
     paste0(paste(sm_skeleton(dag), collapse = ""), "|", paste(sm_vstructures(dag), collapse = ","))
 }
 
-# Enumerate all score-optimal DAGs by branching on EXACT sink ties.
+# Enumerate score-optimal DAGs by branching on EXACT sink ties.
 # Bounded by call.cap / dag.cap; sets truncated = TRUE if either is hit.
+#
+# IMPORTANT - this branches on sink ties ONLY. At each (node w, subset U) it takes
+# the single parent set bps[w, U+1], i.e. whatever fbp's tie-break chose. So when
+# two parent sets score EXACTLY equally, the DAGs using the runner-up are never
+# produced and the returned list is a strict subset of the optimal class.
+#
+# That is deliberate and sound, but only because of a coupling with condition 3 of
+# sm_cpdag_certificate. Condition 3 requires a STRICT coupled parent margin
+# (sm_coupled_parent_witness flags fragile when worst_margin <= 0), which means:
+#
+#   * an exact parent tie whose coupled term is <= 0 gives margin <= 0, is flagged
+#     fragile, and the dataset is not certified - so the un-enumerated branch never
+#     matters;
+#   * an exact parent tie whose coupled term is > 0 gives margin > 0, and the
+#     margin is a valid lower bound on the true post-removal margin, so EVERY
+#     removal breaks the tie strictly in P*'s favour. The runner-up is optimal on
+#     D but not on D \ {o}, so it cannot appear in any post-removal reconstruction
+#     and enumerating P* alone was exactly right.
+#
+# Either way the DAG the DP rebuilds on D \ {o} is one of the DAGs enumerated here
+# (its sinks are D-winners by condition 2, its parent sets are P* by condition 3),
+# and condition 1 checked that they all share one CPDAG.
+#
+# Consequence: do NOT relax condition 3's comparison to a tolerant form such as
+# worst_margin < -eps. That would let an exact parent tie (margin exactly 0) pass,
+# while this enumeration still ignored the tied alternative - and the certificate
+# could then certify a CPDAG that a single removal legitimately changes.
 sm_enumerate_optimal_dags <- function(aflml, bps, F, n.nodes, eps = 1e-9,
                                       dag.cap = 20000L, call.cap = 500000L) {
     bit <- 2^(seq_len(n.nodes) - 1)
@@ -235,6 +262,9 @@ sm_coupled_parent_witness <- function(i_star, U_mask, mask, aflml, bps, ifm,
                 # no shared child value: fall back to the decoupled bound (safe)
                 coupled <- lower_delta[i_star, p_star_idx] - upper_delta[i_star, p_idx]
             }
+            # NB the fragile test below is `worst_margin <= 0`, i.e. STRICT
+            # certification. sm_enumerate_optimal_dags relies on that: see the
+            # note above it before weakening this to a tolerance.
             margin <- best_score - aflml[i_star, p_idx] + coupled
             if (margin < worst_margin) {
                 worst_margin <- margin
@@ -267,6 +297,31 @@ sm_coupled_parent_witness <- function(i_star, U_mask, mask, aflml, bps, ifm,
         fragile = worst_margin <= 0,
         type = "parent"
     )
+}
+
+# Decoupled (independent min/max) parent margin for family (i, U): the original
+# worst-case bound margin(P) = s(P*) - s(P) + lower_delta(P*) - upper_delta(P),
+# worst over competitors. Used only by the diagnostic layer to quantify how much
+# the coupled-by-k margin tightens over the decoupled one.
+sm_decoupled_parent_margin <- function(i_star, U_mask, aflml, bps, ifm,
+                                       lower_delta, upper_delta) {
+    u_idx <- U_mask + 1
+    p_star_idx <- bps[i_star, u_idx]
+    s_star <- aflml[i_star, p_star_idx]
+    if (!is.finite(s_star)) return(NA_real_)
+    worst <- Inf
+    p_mask <- U_mask
+    repeat {
+        p_idx <- p_mask + 1
+        if (ifm[i_star, p_idx] && p_idx != p_star_idx) {
+            m <- s_star - aflml[i_star, p_idx] +
+                lower_delta[i_star, p_star_idx] - upper_delta[i_star, p_idx]
+            if (m < worst) worst <- m
+        }
+        if (p_mask == 0) break
+        p_mask <- bitAnd(p_mask - 1, U_mask)
+    }
+    if (is.finite(worst)) worst else NA_real_
 }
 
 # Sound CPDAG-stability certificate (see stability_findings_and_redesign.md, 3.1).
@@ -363,8 +418,13 @@ sm_cpdag_certificate <- function(aflml, bps, F, ifm, lower_delta, upper_delta,
                     parent_fragile[[length(parent_fragile) + 1]] <- wt
                 }
                 if (diagnostics) {
+                    dec <- sm_decoupled_parent_margin(
+                        w, U, aflml, bps, ifm, lower_delta, upper_delta
+                    )
+                    pstar_size <- sum(bitAnd(bps[w, U + 1] - 1, bit) > 0)
                     parent_diag[[length(parent_diag) + 1]] <- data.frame(
-                        subset = S, node = w, margin = wt$margin
+                        subset = S, node = w, pstar_size = pstar_size,
+                        margin_coupled = wt$margin, margin_decoupled = dec
                     )
                 }
             }
@@ -391,7 +451,7 @@ sm_cpdag_certificate <- function(aflml, bps, F, ifm, lower_delta, upper_delta,
         sink_df <- if (length(sink_diag)) do.call(rbind, sink_diag) else NULL
         parent_df <- if (length(parent_diag)) do.call(rbind, parent_diag) else NULL
         min_sink <- if (!is.null(sink_df)) min(sink_df$margin) else Inf
-        min_parent <- if (!is.null(parent_df)) min(parent_df$margin) else Inf
+        min_parent <- if (!is.null(parent_df)) min(parent_df$margin_coupled) else Inf
         binding <- if (min_sink == Inf && min_parent == Inf) "none" else
             if (min_sink <= min_parent) "sink" else "parent"
         out$diagnostics <- list(
@@ -422,7 +482,8 @@ sm_optimal_dag_from_aflml <- function(aflml, ifm) {
 # CPDAG (skeleton + v-structures) is then compared to the base CPDAG. Necessary
 # and sufficient (no bound slack); also returns the structurally influential
 # observations and what each of them changes.
-sm_loo_exact_cpdag <- function(data, node.sizes, ess, ifm, dag, aflml) {
+sm_loo_exact_cpdag <- function(data, node.sizes, ess, ifm, dag, aflml,
+                               scoring.func = 0L) {
     n <- nrow(data)
     p <- ncol(data)
     base_key <- sm_cpdag_key(dag)
@@ -431,8 +492,8 @@ sm_loo_exact_cpdag <- function(data, node.sizes, ess, ifm, dag, aflml) {
 
     # parents_mat[o, i] = 0-indexed parent-set bitmask of node i in the optimum for D \ {o}
     parents_mat <- .Call(
-        "bnstruct_loo_parents",
-        data, node.sizes, ifm, ess, aflml,
+        "bnstruct_loo_parents_score",
+        data, node.sizes, ifm, ess, aflml, as.integer(scoring.func),
         PACKAGE = "bnstruct"
     )
     bit <- 2^(seq_len(p) - 1)
@@ -504,21 +565,69 @@ sm_stability_bdeu <- function(
     mode = c("bound", "exact"),
     bound.type = c("cons", "tight", "asym_cons", "asym_tight"),
     scope = c("path", "all"),
-    diagnostics = FALSE) {
+    diagnostics = FALSE,
+    scoring.func = 0L,
+    bound.supplied = FALSE,
+    scope.supplied = FALSE) {
+    # scoring.func: 0 = BDeu (ess used), 1 = AIC, 2 = BIC (ess ignored). Every
+    # certificate below only needs (a) the per-family removal-delta bounds and
+    # (b) delta >= 0 and score equivalence, all of which hold for the three
+    # scores; aflml must have been computed with the same scoring.func.
+    #
+    # bound.supplied / scope.supplied say whether the caller set bound.type /
+    # scope explicitly (sm() derives them with missing()). Both arguments apply
+    # to target = "dag" only; accepting them silently under target = "cpdag"
+    # would suggest a control the CPDAG certificate does not have.
     target <- match.arg(target)
     mode <- match.arg(mode)
     bound.type <- match.arg(bound.type)
     scope <- match.arg(scope)
+    scoring.func <- as.integer(scoring.func)
 
-    if (target == "dag" && scope != "path") {
-        stop("stability.scope = 'all' not yet implemented.")
+    if (target == "cpdag") {
+        if (bound.supplied) {
+            stop(
+                "stability.bound applies only to stability.target = 'dag'.\n",
+                "  The CPDAG certificate always uses the asymmetric-tight bounds ",
+                "(Lg/Ug via bnstruct_compute_lg_ug_tight, LF/UF via bnstruct_compute_lf_uf) ",
+                "together with the coupled per-child-value parent margin; the symmetric ",
+                "'cons'/'tight' variants have no CPDAG counterpart.\n",
+                "  Drop stability.bound, or set stability.target = 'dag'."
+            )
+        }
+        if (scope.supplied) {
+            stop(
+                "stability.scope applies only to stability.target = 'dag'.\n",
+                "  The CPDAG certificate derives its own set of subsets - the union over ",
+                "every optimal-order branch (sm_optimal_visited) - which is neither the ",
+                "single backtracking path ('path') nor all 2^p subsets ('all').\n",
+                "  Drop stability.scope, or set stability.target = 'dag'."
+            )
+        }
+    } else {
+        # scope = "path" walks only the subsets on the backtracking path
+        # S_0 = V, S_{t+1} = S_t \ {Last(S_t)}. That is sound for the oriented-DAG
+        # target: certifying the sink at every path subset means the perturbed DP
+        # follows the same path, so no off-path subset is ever visited. "all"
+        # would check every subset instead - a strictly stronger statement about
+        # the whole DP table, not needed for DAG stability.
+        if (scope != "path") {
+            stop("stability.scope = 'all' not yet implemented.")
+        }
+
+        # Exact leave-one-out is implemented for the CPDAG target only. Silently
+        # falling back to the bound certificate would downgrade a necessary-and-
+        # sufficient answer to a merely sufficient one, so refuse instead.
+        if (mode == "exact") {
+            stop("stability.mode = 'exact' is implemented only for stability.target = 'cpdag'.")
+        }
     }
 
     n.nodes <- ncol(data)
 
     bounds <- .Call(
-        "bnstruct_bdeu_loo_bounds",
-        data, node.sizes, ifm, ess,
+        "bnstruct_score_loo_bounds",
+        data, node.sizes, ifm, ess, scoring.func,
         PACKAGE = "bnstruct"
     )
 
@@ -536,8 +645,10 @@ sm_stability_bdeu <- function(
         # every row and compare CPDAGs. Necessary and sufficient (no bound slack)
         # and yields the list of structurally influential observations.
         if (mode == "exact") {
-            cert <- sm_loo_exact_cpdag(data, node.sizes, ess, ifm, dag, aflml)
-            cert$scope <- scope
+            cert <- sm_loo_exact_cpdag(data, node.sizes, ess, ifm, dag, aflml,
+                                       scoring.func = scoring.func)
+            # exact mode examines every observation; no subset restriction applies
+            cert$scope <- "all_observations"
             return(cert)
         }
 
@@ -559,7 +670,9 @@ sm_stability_bdeu <- function(
         )
         cert$target <- "cpdag"
         cert$bound_type <- "asym_tight"
-        cert$scope <- scope
+        # the certificate checks every subset reachable on any optimal-order
+        # branch, not the single backtracking path
+        cert$scope <- "optimal_visited"
         return(cert)
     }
 

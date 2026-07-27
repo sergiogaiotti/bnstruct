@@ -24,6 +24,10 @@ sm <- function(x, node.sizes, scoring.func = 0, cont.nodes = NULL, max.fanin = N
     storage.mode(node.sizes) <- "integer" # just to be sure
     storage.mode(scoring.func) <- "integer"
 
+    # record before match.arg collapses the default vector to its first element
+    bound.default <- missing(stability.bound)
+    scope.default <- missing(stability.scope)
+
     stability.target <- match.arg(stability.target)
     stability.mode <- match.arg(stability.mode)
     stability.bound <- match.arg(stability.bound)
@@ -146,10 +150,6 @@ sm <- function(x, node.sizes, scoring.func = 0, cont.nodes = NULL, max.fanin = N
     dag <- parents.to.dag(parents)
 
     if (stability) {
-        if (scoring.func != 0) {
-            stop("Leave-one-out stability check currently implemented only for BDeu.")
-        }
-
         stab <- sm_stability_bdeu(
             data = data,
             node.sizes = node.sizes,
@@ -164,7 +164,13 @@ sm <- function(x, node.sizes, scoring.func = 0, cont.nodes = NULL, max.fanin = N
             mode = stability.mode,
             bound.type = stability.bound,
             scope = stability.scope,
-            diagnostics = stability.diagnostics
+            diagnostics = stability.diagnostics,
+            scoring.func = scoring.func,
+            # stability.bound / stability.scope are meaningful for the "dag"
+            # target only; report whether the caller actually set them so that
+            # sm_stability_bdeu can reject them instead of ignoring them
+            bound.supplied = !bound.default,
+            scope.supplied = !scope.default
         )
 
         return(list(

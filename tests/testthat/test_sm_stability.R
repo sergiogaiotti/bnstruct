@@ -58,11 +58,45 @@ test_that("sm return.tables includes F", {
 })
 
 
-test_that("sm stability errors for non-BDeu scores", {
-    expect_error(
-        bnstruct:::sm(sm_test_data, sm_test_sizes, scoring.func = 1, stability = TRUE),
-        "BDeu"
-    )
+test_that("sm stability runs under BIC and AIC (cpdag, both modes)", {
+    for (func in c(1L, 2L)) {
+        res_e <- bnstruct:::sm(sm_small_data, sm_small_sizes,
+            scoring.func = func,
+            stability = TRUE, stability.target = "cpdag", stability.mode = "exact"
+        )
+        expect_true(is.list(res_e$stability))
+        expect_identical(res_e$stability$mode, "exact")
+        res_b <- bnstruct:::sm(sm_small_data, sm_small_sizes,
+            scoring.func = func,
+            stability = TRUE, stability.target = "cpdag", stability.mode = "bound"
+        )
+        expect_true(is.list(res_b$stability))
+        # soundness: a bound certificate implies exact stability
+        if (isTRUE(res_b$stability$stable_cpdag)) {
+            expect_true(res_e$stability$stable_cpdag)
+        }
+    }
+})
+
+test_that("score_loo_bounds deltas are nonnegative for AIC and BIC", {
+    p <- ncol(sm_small_data)
+    ifm <- matrix(1L, p, 2^p)
+    for (i in 1:p) {
+        for (s in 0:(2^p - 1)) {
+            if (bitwAnd(s, 2^(i - 1)) > 0) ifm[i, s + 1] <- 0L
+        }
+    }
+    X <- sm_small_data
+    storage.mode(X) <- "integer"
+    ns <- sm_small_sizes
+    storage.mode(ns) <- "integer"
+    for (func in c(1L, 2L)) {
+        b <- .Call("bnstruct_score_loo_bounds",
+            X, ns, ifm, 1.0, func,
+            PACKAGE = "bnstruct"
+        )
+        expect_true(min(b$lower[ifm == 1]) >= 0)
+    }
 })
 
 
@@ -190,4 +224,84 @@ test_that("oriented-DAG certificate is sound: certified => all LOO DAGs invarian
     } else {
         succeed("certificate inconclusive on this dataset (allowed)")
     }
+})
+
+
+test_that("stability.mode = 'exact' is refused for the oriented-DAG target", {
+    expect_error(
+        bnstruct:::sm(sm_small_data, sm_small_sizes,
+            stability = TRUE, stability.target = "dag", stability.mode = "exact"
+        ),
+        "only for stability.target = 'cpdag'",
+        fixed = TRUE
+    )
+    # the bound mode still works for that target
+    expect_true(is.list(bnstruct:::sm(sm_small_data, sm_small_sizes,
+        stability = TRUE, stability.target = "dag", stability.mode = "bound"
+    )$stability))
+})
+
+
+test_that("Lg/Ug carry no garbage for candidate sets containing the node", {
+    p <- ncol(sm_small_data)
+    X <- sm_small_data
+    storage.mode(X) <- "integer"
+    ns <- sm_small_sizes
+    storage.mode(ns) <- "integer"
+    ifm <- matrix(1L, p, 2^p)
+    for (i in 1:p) {
+        for (s in 0:(2^p - 1)) {
+            if (bitwAnd(s, 2^(i - 1)) > 0) ifm[i, s + 1] <- 0L
+        }
+    }
+    A <- .Call("bnstruct_all_fam_log_marg_lik", X, ns, ifm, 1, 0L, PACKAGE = "bnstruct")
+    bps <- .Call("bnstruct_fbp", aflml = A, PACKAGE = "bnstruct")
+    b <- .Call("bnstruct_score_loo_bounds", X, ns, ifm, 1, 0L, PACKAGE = "bnstruct")
+    self <- which(bps == 0L) # candidate sets containing the node itself
+    expect_true(length(self) > 0)
+    for (fn in c("bnstruct_compute_lg_ug_cons", "bnstruct_compute_lg_ug_tight")) {
+        g <- if (fn == "bnstruct_compute_lg_ug_cons") {
+            .Call(fn, bps, b$lower, b$upper, ifm, PACKAGE = "bnstruct")
+        } else {
+            .Call(fn, A, bps, b$lower, b$upper, ifm, PACKAGE = "bnstruct")
+        }
+        expect_true(all(g$lower[self] == -Inf))
+        expect_true(all(g$upper[self] == -Inf))
+        # the entries the certificate actually reads are unaffected
+        expect_true(all(is.finite(g$lower[bps != 0L])))
+    }
+})
+
+
+test_that("stability.bound and stability.scope are rejected for the cpdag target", {
+    expect_error(
+        bnstruct:::sm(sm_small_data, sm_small_sizes,
+            stability = TRUE, stability.target = "cpdag", stability.bound = "tight"
+        ),
+        "applies only to stability.target = 'dag'",
+        fixed = TRUE
+    )
+    expect_error(
+        bnstruct:::sm(sm_small_data, sm_small_sizes,
+            stability = TRUE, stability.target = "cpdag", stability.scope = "path"
+        ),
+        "applies only to stability.target = 'dag'",
+        fixed = TRUE
+    )
+    # not supplying them (the default) is fine, and the reported scope is truthful
+    b <- bnstruct:::sm(sm_small_data, sm_small_sizes,
+        stability = TRUE, stability.target = "cpdag", stability.mode = "bound"
+    )$stability
+    expect_identical(b$scope, "optimal_visited")
+    expect_identical(b$bound_type, "asym_tight")
+    e <- bnstruct:::sm(sm_small_data, sm_small_sizes,
+        stability = TRUE, stability.target = "cpdag", stability.mode = "exact"
+    )$stability
+    expect_identical(e$scope, "all_observations")
+    # and both remain accepted for the dag target
+    d <- bnstruct:::sm(sm_small_data, sm_small_sizes,
+        stability = TRUE, stability.target = "dag",
+        stability.bound = "asym_tight", stability.scope = "path"
+    )$stability
+    expect_identical(d$bound_type, "asym_tight")
 })
