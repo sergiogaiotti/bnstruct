@@ -305,3 +305,21 @@ test_that("stability.bound and stability.scope are rejected for the cpdag target
     )$stability
     expect_identical(d$bound_type, "asym_tight")
 })
+
+test_that("tied-optima enumeration visits each (subset, parents) state once", {
+    # Full factorial design: every pair of variables is exactly independent in the
+    # data, so the optimum is the empty graph and all 10! sink orderings tie. The
+    # unmemoized recursion walked those orderings, hit call.cap and reported a
+    # truncated enumeration, which made condition 1 refuse the certificate.
+    p <- 10
+    X <- as.matrix(expand.grid(rep(list(1:2), p)))
+    storage.mode(X) <- "integer"
+    tab <- bnstruct:::sm(X, rep(2L, p), return.tables = TRUE)
+    expect_equal(sum(tab$dag), 0)
+    en <- bnstruct:::sm_enumerate_optimal_dags(tab$aflml, tab$bps, tab$F, p)
+    expect_false(en$truncated)
+    expect_length(en$dags, 1)
+    st <- bnstruct:::sm(X, rep(2L, p), stability = TRUE, stability.mode = "bound")$stability
+    expect_false(st$enumeration_truncated)
+    expect_true(st$optimal_cpdag_unique)
+})

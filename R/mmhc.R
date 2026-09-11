@@ -485,25 +485,26 @@ g2 <- function(data, sizes, x, y, chi.th = 0.05, z = c(), min.counts = 5) {
 hc_w_disc <- function(data, node.sizes, scoring.func = 0, cpc, cont.nodes = c(), ess = 1, tabu.tenure = 100,
                       max.parents = length(node.sizes) - 1,
                       init.net = NULL, wm.max = 15, layering = NULL, layer.struct = NULL,
-                      mandatory.edges = NULL, L_card = NULL, max.disc_cycles = 10, approx_parents = 0, n.pre.binning = 0, pelt = 0) {
-  if (is.null(L_card)) {
-    L_card <- -1L
+                      mandatory.edges = NULL, L.card = NULL, max.disc.cycles = 10, approx.parents = 0, n.pre.binning = 0, greedy.heuristic = 0) {
+  if (is.null(L.card)) {
+    L.card <- -1L
   } else {
-    L_card <- as.integer(L_card)
+    L.card <- as.integer(L.card)
   }
   n.nodes <- ncol(data)
   n.cases <- nrow(data)
   # just to be sure
   storage.mode(node.sizes) <- "integer"
-  storage.mode(approx_parents) <- "integer"
-  storage.mode(max.disc_cycles) <- "integer"
+  storage.mode(approx.parents) <- "integer"
+  storage.mode(max.disc.cycles) <- "integer"
   storage.mode(cont.nodes) <- "integer"
   storage.mode(n.pre.binning) <- "integer"
-  storage.mode(pelt) <- "integer"
+  storage.mode(greedy.heuristic) <- "integer"
   # store original data
   original.data <- data
   # Initialize lgamma cache vector
-  lgamma_cache_vec <- lgamma(c(0:(n.cases + 100)))
+  lgamma_max <- min(n.cases + 100, 1e6)
+  lgamma_cache_vec <- lgamma(c(0:(lgamma_max)))
   # quantize data of continuous nodes
   levels <- rep(0, n.nodes)
   levels[cont.nodes] <- node.sizes[cont.nodes]
@@ -705,7 +706,7 @@ hc_w_disc <- function(data, node.sizes, scoring.func = 0, cpc, cont.nodes = c(),
       affected_order <- as.integer(rev(top_order[top_order %in% affected]))
 
       out.disc <- .Call("bnstruct_dvbn_discretize_all", original.data[, affected_order, drop = F], data, n.nodes, n.cases, n.cont_affected, affected_order - 1L, node.sizes, lapply(curr.parents, function(x) as.integer(x - 1L)), lapply(curr.children, function(x) as.integer(x - 1L)),
-        max.disc_cycles, approx_parents, L_card, n.pre.binning, pelt, lgamma_cache_vec,
+        max.disc.cycles, approx.parents, L.card, n.pre.binning, greedy.heuristic, lgamma_cache_vec,
         PACKAGE = "bnstruct"
       )
       curr.discretization[affected_order] <- out.disc
@@ -713,22 +714,12 @@ hc_w_disc <- function(data, node.sizes, scoring.func = 0, cpc, cont.nodes = c(),
       node.sizes[affected] <- sapply(curr.discretization[affected], length) + 1L
 
       # recalculate scores for affected nodes
-      for (i in affected)
-      {
-        # affected
-        curr.score.nodes[i] <- .Call("bnstruct_score_node", data, node.sizes, i - 1L, which(curr.g[, i] != 0) - 1L,
-          scoring.func, ess,
+      nodes_to_rescore <- unique(unlist(c(curr.children[affected], affected)))
+      for (node_idx in nodes_to_rescore) {
+        curr.score.nodes[node_idx] <- .Call("bnstruct_score_node", data, node.sizes, node_idx - 1L,
+          which(curr.g[, node_idx] != 0) - 1L, scoring.func, ess,
           PACKAGE = "bnstruct"
         )
-        # affected children (not in affected)
-        children <- setdiff(which(curr.g[i, ] != 0), affected)
-        for (j in children)
-        {
-          curr.score.nodes[j] <- .Call("bnstruct_score_node", data, node.sizes, j - 1L, which(curr.g[, j] != 0) - 1L,
-            scoring.func, ess,
-            PACKAGE = "bnstruct"
-          )
-        }
       }
     }
     # print(c(tabu.pt,best.node,next.pert[best.node],sum(curr.score.nodes)))
@@ -750,6 +741,241 @@ hc_w_disc <- function(data, node.sizes, scoring.func = 0, cpc, cont.nodes = c(),
   }
 
   return(list(dag = global.best.g, discretization = global.best.discretization))
+}
+
+hc_block_disc <- function(data, node.sizes, scoring.func = 0, cpc, cont.nodes = c(), ess = 1, tabu.tenure = 100,
+                          max.parents = length(node.sizes) - 1,
+                          init.net = NULL, wm.max = 15, layering = NULL, layer.struct = NULL,
+                          mandatory.edges = NULL, L.card = NULL, max.disc.cycles = 10, approx.parents = 0,
+                          n.pre.binning = 0, greedy.heuristic = 0, max.outer.iter = 10,
+                          disc.tol = 1e-8, outer.trace = FALSE) {
+  if (is.null(L.card)) {
+    L.card <- -1L
+  } else {
+    L.card <- as.integer(L.card)
+  }
+  n.nodes <- ncol(data)
+  n.cases <- nrow(data)
+
+  # just to be sure
+  storage.mode(node.sizes) <- "integer"
+  storage.mode(approx.parents) <- "integer"
+  storage.mode(max.disc.cycles) <- "integer"
+  storage.mode(cont.nodes) <- "integer"
+  storage.mode(n.pre.binning) <- "integer"
+  storage.mode(greedy.heuristic) <- "integer"
+  storage.mode(max.outer.iter) <- "integer"
+
+  original.data <- data
+  storage.mode(original.data) <- "double"
+
+  # Initialize lgamma cache vector
+  lgamma_max <- min(n.cases + 100, 1e6)
+  lgamma_cache_vec <- lgamma(c(0:(lgamma_max)))
+
+  # Initial quantization from provided cardinalities
+  levels <- rep(0, n.nodes)
+  levels[cont.nodes] <- node.sizes[cont.nodes]
+  out.data <- quantize.matrix(data, levels)
+  data <- out.data$quant
+  storage.mode(data) <- "integer"
+
+  curr.discretization <- rep(list(NA), n.nodes)
+  if (length(cont.nodes) > 0L) {
+    curr.discretization[cont.nodes] <- lapply(out.data$quantiles[cont.nodes], function(x) x[2:(length(x) - 1L)])
+    node.sizes[cont.nodes] <- as.integer(sapply(curr.discretization[cont.nodes], length) + 1L)
+  }
+
+  if (!is.null(init.net)) {
+    curr.g <- init.net
+  } else {
+    curr.g <- matrix(0L, n.nodes, n.nodes)
+  }
+  storage.mode(curr.g) <- "integer"
+
+  same_discretization <- function(old.disc, new.disc, nodes, tol) {
+    if (length(nodes) == 0L) {
+      return(TRUE)
+    }
+    for (v in nodes) {
+      old.v <- old.disc[[v]]
+      new.v <- new.disc[[v]]
+      if (all(is.na(old.v)) && all(is.na(new.v))) {
+        next
+      }
+      if (length(old.v) != length(new.v)) {
+        return(FALSE)
+      }
+      if (length(old.v) > 0L && any(abs(old.v - new.v) > tol)) {
+        return(FALSE)
+      }
+    }
+    TRUE
+  }
+
+  max_discretization_diff <- function(old.disc, new.disc, nodes) {
+    if (length(nodes) == 0L) {
+      return(0)
+    }
+    max.diff <- 0
+    for (v in nodes) {
+      old.v <- old.disc[[v]]
+      new.v <- new.disc[[v]]
+      if (all(is.na(old.v)) && all(is.na(new.v))) {
+        next
+      }
+      if (length(old.v) != length(new.v)) {
+        return(Inf)
+      }
+      if (length(old.v) > 0L) {
+        max.diff <- max(max.diff, max(abs(old.v - new.v)))
+      }
+    }
+    max.diff
+  }
+
+  total_score <- function(curr.data, curr.sizes, curr.g, curr.scoring.func, curr.ess) {
+    node.scores <- numeric(ncol(curr.data))
+    for (i in seq_len(ncol(curr.data))) {
+      node.scores[i] <- .Call(
+        "bnstruct_score_node",
+        curr.data,
+        curr.sizes,
+        i - 1L,
+        which(curr.g[, i] != 0) - 1L,
+        curr.scoring.func,
+        curr.ess,
+        PACKAGE = "bnstruct"
+      )
+    }
+    sum(node.scores)
+  }
+
+  iter <- 0L
+  exit.reason <- ""
+  history <- data.frame(
+    iter = integer(0),
+    score = numeric(0),
+    edge.count = integer(0),
+    dag.diff = integer(0),
+    disc.max.diff = numeric(0),
+    dag.stable = logical(0),
+    disc.stable = logical(0),
+    stringsAsFactors = FALSE
+  )
+
+  repeat {
+    iter <- iter + 1L
+    prev.g <- curr.g
+    prev.discretization <- curr.discretization
+
+    # Full structure learning phase on fixed discretized data
+    curr.g <- hc(
+      data = data,
+      node.sizes = node.sizes,
+      scoring.func = scoring.func,
+      cpc = cpc,
+      cont.nodes = integer(0),
+      ess = ess,
+      tabu.tenure = tabu.tenure,
+      max.parents = max.parents,
+      init.net = curr.g,
+      wm.max = wm.max,
+      layering = layering,
+      layer.struct = layer.struct,
+      mandatory.edges = mandatory.edges
+    )
+    storage.mode(curr.g) <- "integer"
+
+    # Full re-discretization phase
+    if (length(cont.nodes) > 0L) {
+      out.par_child <- adj_to_parents_children(curr.g)
+      curr.parents <- out.par_child$parents
+      curr.children <- out.par_child$children
+
+      top_order <- topological.sort(curr.g)
+      affected_order <- as.integer(rev(top_order[top_order %in% cont.nodes]))
+
+      out.disc <- .Call(
+        "bnstruct_dvbn_discretize_all",
+        original.data[, affected_order, drop = F],
+        data,
+        n.nodes,
+        n.cases,
+        length(affected_order),
+        affected_order - 1L,
+        node.sizes,
+        lapply(curr.parents, function(x) as.integer(x - 1L)),
+        lapply(curr.children, function(x) as.integer(x - 1L)),
+        max.disc.cycles,
+        approx.parents,
+        L.card,
+        n.pre.binning,
+        greedy.heuristic,
+        lgamma_cache_vec,
+        PACKAGE = "bnstruct"
+      )
+
+      curr.discretization[affected_order] <- out.disc
+      data[, cont.nodes] <- apply_discretization(original.data[, cont.nodes, drop = F], curr.discretization[cont.nodes])
+      node.sizes[cont.nodes] <- as.integer(sapply(curr.discretization[cont.nodes], length) + 1L)
+    }
+
+    dag.stable <- identical(prev.g, curr.g)
+    dag.diff <- sum(prev.g != curr.g)
+    disc.max.diff <- max_discretization_diff(prev.discretization, curr.discretization, cont.nodes)
+    disc.stable <- same_discretization(prev.discretization, curr.discretization, cont.nodes, disc.tol)
+    curr.score <- total_score(data, node.sizes, curr.g, scoring.func, ess)
+    history <- rbind(
+      history,
+      data.frame(
+        iter = iter,
+        score = curr.score,
+        edge.count = sum(curr.g != 0L),
+        dag.diff = dag.diff,
+        disc.max.diff = disc.max.diff,
+        dag.stable = dag.stable,
+        disc.stable = disc.stable,
+        stringsAsFactors = FALSE
+      )
+    )
+
+    if (isTRUE(outer.trace)) {
+      message(sprintf(
+        "hc_block_disc outer iteration %d: score=%.6f edges=%d dag.diff=%d disc.max.diff=%g dag.stable=%s disc.stable=%s",
+        iter,
+        curr.score,
+        sum(curr.g != 0L),
+        dag.diff,
+        disc.max.diff,
+        dag.stable,
+        disc.stable
+      ))
+    }
+
+    if (dag.stable && disc.stable) {
+      exit.reason <- "converged"
+      break
+    }
+    if (iter >= max.outer.iter) {
+      exit.reason <- "max.outer.iter"
+      break
+    }
+  }
+
+  if (isTRUE(outer.trace)) {
+    message(sprintf("hc_block_disc exit: reason=%s iterations=%d", exit.reason, iter))
+  }
+
+  list(
+    dag = curr.g,
+    discretization = curr.discretization,
+    diagnostics = list(
+      exit.reason = exit.reason,
+      iterations = iter,
+      history = history
+    )
+  )
 }
 
 K2 <- function(data, node.sizes, scoring.func = 0, cpc, cont.nodes = c(), ess = 1,
@@ -903,4 +1129,244 @@ K2 <- function(data, node.sizes, scoring.func = 0, cpc, cont.nodes = c(), ess = 
   } # end loop over orders
 
   return(global.best.g)
+}
+
+K2_w_disc <- function(data, node.sizes, scoring.func = 0, cpc, cont.nodes = c(), ess = 1,
+                      max.parents = length(node.sizes) - 1,
+                      init.net = NULL, wm.max = 15, layering = NULL, layer.struct = NULL,
+                      mandatory.edges = NULL, n.starts = 1, max.disc.cycles = 5, approx.parents = 0, L.card = NULL, n.pre.binning = 0, greedy.heuristic = 1L) {
+  if (is.null(L.card)) {
+    L.card <- -1L
+  } else {
+    L.card <- as.integer(L.card)
+  }
+  storage.mode(approx.parents) <- "integer"
+  storage.mode(max.disc.cycles) <- "integer"
+  storage.mode(cont.nodes) <- "integer"
+  storage.mode(n.pre.binning) <- "integer"
+  storage.mode(greedy.heuristic) <- "integer"
+  n.nodes <- ncol(data)
+  n.cases <- nrow(data)
+  # just to be sure
+  storage.mode(node.sizes) <- "integer"
+  # Initialize lgamma cache vector
+  lgamma_max <- min(n.cases + 100, 1e6)
+  lgamma_cache_vec <- lgamma(c(0:(lgamma_max)))
+
+  # quantize data of continuous nodes
+  # Store original continuous data before quantization
+  cont_data <- data[, cont.nodes, drop = F]
+  storage.mode(cont_data) <- "double"
+
+  levels <- rep(0, n.nodes)
+  levels[cont.nodes] <- node.sizes[cont.nodes]
+
+  out.data <- quantize.matrix(data, levels)
+  data <- out.data$quant
+  storage.mode(data) <- "integer"
+
+  # apply mandatory edges (if present)
+  m.edges <- matrix(0L, n.nodes, n.nodes)
+  if (!is.null(mandatory.edges)) {
+    m.edges <- m.edges | mandatory.edges
+  }
+  storage.mode(m.edges) <- "integer"
+
+  # start with init.net if not NULL, otherwise with empty matrix
+  if (!is.null(init.net)) {
+    curr.g <- init.net
+    # just to be sure
+    storage.mode(curr.g) <- "integer"
+    # add init edges out of cpc
+    cpc <- cpc | init.net | t(init.net)
+  } else {
+    curr.g <- matrix(0L, n.nodes, n.nodes)
+  } # integers!
+  curr.g <- curr.g | m.edges
+
+  # apply layering
+  if (!is.null(layer.struct) && is.null(layering)) {
+    stop("layer.struct provided without layering.\n")
+  }
+  if (!is.null(layering) && length(unique(layering)) > 1) {
+    n.layers <- length(unique(layering))
+
+    if (is.null(layer.struct)) {
+      layer.struct <- matrix(1L, n.layers, n.layers)
+      layer.struct[lower.tri(layer.struct)] <- 0
+      layer.struct[1, 1] <- 0
+    }
+
+    layers <- matrix(1L, n.nodes, n.nodes)
+    for (i in 1:n.layers) {
+      for (j in 1:n.layers) {
+        layers[which(layering == i), which(layering == j)] <- layer.struct[i, j]
+      }
+    }
+    diag(layers) <- 0
+
+    # keep only edges allowed by both the CPC / initial network and the layering
+    cpc <- cpc & layers
+    if (sum(m.edges | t(m.edges)) > 0L && sum(curr.g & layers) == 0L) {
+      stop("the mandatory edges provided are inconsistent with the given layering.\n")
+    }
+  }
+  # end apply layering
+
+  # generate random orders compatible with the partially ordered graph
+  p.order_graph <- matrix(0L, n.nodes, n.nodes)
+  for (i in 1:n.nodes) {
+    for (j in 1:n.nodes) {
+      if (cpc[i, j] != cpc[j, i]) {
+        if (cpc[i, j] == 1L) {
+          p.order_graph[i, j] <- 1L
+        } else {
+          p.order_graph[j, i] <- 1L
+        }
+      }
+    }
+  }
+  p.order_graph <- p.order_graph | m.edges
+  # generate random orders consistent with the partially ordered graph
+  orders <- lapply(rep(list(p.order_graph), n.starts * 10), rand.topological.sort)
+  # Keep only n.starts unique orders if available
+  orders <- unique(orders)
+  if (length(orders) > n.starts) {
+    orders <- orders[1:n.starts]
+  } else {
+    message(sprintf("Only %d unique orders could be generated. Requested n.starts were %d. Running with available orders.", length(orders), n.starts))
+  }
+  # end generate random orders
+
+  # initialize scores
+  curr.score.nodes <- array(0, n.nodes)
+  for (i in 1L:n.nodes) {
+    curr.score.nodes[i] <- .Call("bnstruct_score_node", data, node.sizes, i - 1L, which(curr.g[, i] != 0) - 1L,
+      scoring.func, ess,
+      PACKAGE = "bnstruct"
+    )
+  }
+
+  # initialize global best solution
+  global.best.g <- curr.g
+  global.best.score <- sum(curr.score.nodes)
+  global.best.disc <- out.data$quantiles
+
+  curr.g.preK2 <- curr.g
+  curr.score.nodes.preK2 <- curr.score.nodes
+  out.par_child <- adj_to_parents_children(curr.g)
+
+  # K2 search for each order
+  for (start in seq_along(orders)) {
+    order <- orders[[start]]
+
+    # Reset to pre-K2 state
+    curr.g <- curr.g.preK2
+    curr.score.nodes <- curr.score.nodes.preK2
+    curr.parents <- out.par_child$parents
+    curr.children <- out.par_child$children
+    # Reset entire data matrix
+    data <- out.data$quant
+    storage.mode(data) <- "integer"
+    curr.disc <- out.data$quantiles
+    curr.node.sizes <- as.integer(node.sizes) # Explicit copy and ensure integer type
+    # Main K2 loop
+    for (i in 1L:n.nodes) {
+      node <- order[i]
+      while (TRUE) {
+        best.par <- -1L
+        best.s.diff <- 0L # Initialize to 0 so we only accept improvements
+
+        # --- STEP 1: SCAN CANDIDATES (Fixed Discretization) ---
+        # We assume the current 'data' is the "truth" for this comparison
+        for (par in order[seq_len(i - 1L)]) {
+          # Check validity (CPC, mandatory, max parents)
+          if (curr.g[par, node] == 0 && cpc[par, node] == 1L &&
+            (m.edges[par, node] == 0 && m.edges[node, par] == 0) &&
+            sum(curr.g[, node]) < max.parents) {
+            # Temporarily form the parent set for scoring
+            current_pars <- curr.parents[[node]]
+            temp_pars <- c(current_pars, par)
+
+            # Compute score with Candidate Parent using CURRENT data
+            s.new <- .Call("bnstruct_score_node", data, curr.node.sizes, node - 1L,
+              as.integer(temp_pars - 1L), scoring.func, ess,
+              PACKAGE = "bnstruct"
+            )
+
+            s.diff <- s.new - curr.score.nodes[node]
+
+            if (s.diff > best.s.diff) {
+              best.s.diff <- s.diff
+              best.par <- par
+            }
+          }
+        }
+
+        # --- STEP 2: COMMIT & RE-DISCRETIZE ---
+        if (best.par != -1L) {
+          # 1. Update Structure
+          prev.g <- curr.g # Save previous graph for 'detect_affected'
+          curr.g[best.par, node] <- 1L
+          curr.parents[[node]] <- c(curr.parents[[node]], best.par)
+          curr.children[[best.par]] <- c(curr.children[[best.par]], node)
+
+          # 2. Alternating Step: Re-Discretize
+          # We check if this structural change affects any continuous variables
+          affected <- detect_affected_continuous_vars(prev.g, curr.g, cont.nodes)
+          n.cont_affected <- length(affected)
+
+          if (n.cont_affected > 0) {
+            top_order <- topological.sort(curr.g)
+            affected_order <- as.integer(rev(top_order[top_order %in% affected]))
+            affected_order_cont_data <- match(affected_order, cont.nodes)
+
+            # CALL C DISCRETIZER
+            out.disc <- .Call(
+              "bnstruct_dvbn_discretize_all",
+              cont_data[, affected_order_cont_data, drop = F],
+              data, n.nodes, n.cases, n.cont_affected, affected_order - 1L, curr.node.sizes,
+              lapply(curr.parents, function(x) as.integer(x - 1L)),
+              lapply(curr.children, function(x) as.integer(x - 1L)),
+              max.disc.cycles, approx.parents, L.card, n.pre.binning,
+              greedy.heuristic, lgamma_cache_vec
+            )
+
+            # Update Data
+            data[, affected_order] <- apply_discretization(cont_data[, affected_order_cont_data, drop = F], out.disc)
+            storage.mode(data) <- "integer"
+            curr.disc[affected_order] <- out.disc
+            # Update Node Sizes
+            curr.node.sizes[affected_order] <- sapply(curr.disc[affected_order], length) + 1L
+            storage.mode(curr.node.sizes) <- "integer"
+
+            # 3. Update Scores
+            # Because discretization changed, we muast re-calculate the score for affected nodes and their children
+            children_of_affected <- unlist(curr.children[affected])
+            nodes_to_update <- unique(c(affected, children_of_affected, node))
+            for (n in nodes_to_update) {
+              curr.score.nodes[n] <- .Call("bnstruct_score_node", data, curr.node.sizes, n - 1L,
+                as.integer(curr.parents[[n]] - 1L), scoring.func, ess,
+                PACKAGE = "bnstruct"
+              )
+            }
+          } else {
+            # No discretization change, use incremental score update
+            curr.score.nodes[node] <- curr.score.nodes[node] + best.s.diff
+          }
+        } else {
+          break # No parent improves score
+        }
+      }
+    }
+
+    # check for global best
+    if (global.best.score < sum(curr.score.nodes)) {
+      global.best.g <- curr.g
+      global.best.score <- sum(curr.score.nodes)
+      global.best.disc <- curr.disc
+    }
+  }
+
+  return(list(dag = global.best.g, discretization = global.best.disc))
 }

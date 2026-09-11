@@ -88,6 +88,15 @@ sm_enumerate_optimal_dags <- function(aflml, bps, F, n.nodes, eps = 1e-9,
     full <- 2^n.nodes - 1
     dags <- list()
     seen <- new.env(hash = TRUE)
+    # Exact pruning of the recursion. What rec(S, parents) enumerates from here depends
+    # only on the remaining set S, and each DAG it emits is the parents fixed so far plus
+    # one completion over S. Two branches reaching the same (S, fixed parents) - e.g. the
+    # same tied nodes removed in a different order - therefore emit identical DAGs, so
+    # the second visit is skipped. Without this the recursion walks every optimal
+    # ordering (every linear extension of every optimal DAG), which is combinatorial in
+    # the number of isolated or weakly connected nodes and hit call.cap at p = 10 on
+    # sparse graphs with only a handful of distinct optima.
+    states <- new.env(hash = TRUE)
     truncated <- FALSE
     calls <- 0L
 
@@ -95,6 +104,12 @@ sm_enumerate_optimal_dags <- function(aflml, bps, F, n.nodes, eps = 1e-9,
         if (truncated) {
             return(invisible())
         }
+        skey <- paste(S, paste(vapply(parents, function(x) if (is.null(x)) 0 else x, numeric(1)),
+                               collapse = ","), sep = "|")
+        if (!is.null(states[[skey]])) {
+            return(invisible())
+        }
+        assign(skey, TRUE, envir = states)
         calls <<- calls + 1L
         if (calls > call.cap) {
             truncated <<- TRUE
