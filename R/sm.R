@@ -17,6 +17,9 @@ sm <- function(x, node.sizes, scoring.func = 0, cont.nodes = NULL, max.fanin = N
                stability.bound = c("cons", "tight", "asym_cons", "asym_tight"),
                stability.scope = c("path", "all"),
                stability.diagnostics = FALSE,
+               stability.sink = c("decoupled", "coupled"),
+               stability.witnesses = 64L,
+               stability.parent = c("child", "rows"),
                return.tables = FALSE) {
     n.cases <- nrow(x)
     n.nodes <- ncol(x)
@@ -32,6 +35,8 @@ sm <- function(x, node.sizes, scoring.func = 0, cont.nodes = NULL, max.fanin = N
     stability.mode <- match.arg(stability.mode)
     stability.bound <- match.arg(stability.bound)
     stability.scope <- match.arg(stability.scope)
+    stability.sink <- match.arg(stability.sink)
+    stability.parent <- match.arg(stability.parent)
 
 
     # if no max.fanin is given, assume maximum possible
@@ -170,7 +175,10 @@ sm <- function(x, node.sizes, scoring.func = 0, cont.nodes = NULL, max.fanin = N
             # target only; report whether the caller actually set them so that
             # sm_stability_bdeu can reject them instead of ignoring them
             bound.supplied = !bound.default,
-            scope.supplied = !scope.default
+            scope.supplied = !scope.default,
+            sink = stability.sink,
+            witness.cap = as.integer(stability.witnesses),
+            parent = stability.parent
         )
 
         return(list(

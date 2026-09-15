@@ -167,6 +167,46 @@ SEXP bnstruct_fbs_with_scores(SEXP bps, SEXP aflml)
 	return (res);
 }
 
+/* Lexicographic order of the rows of an n_ex x n_nodes integer matrix stored by
+ * column (NA_INTEGER compares as an ordinary value), ties broken by row index, so
+ * equal rows form consecutive runs with the smallest index first. qsort has no
+ * context argument, hence the file-scope pointers; they are set and used only
+ * inside loo_sort_rows. */
+static const unsigned int *loo_sort_d = NULL;
+static unsigned int loo_sort_n = 0, loo_sort_p = 0;
+
+static int loo_row_cmp(const void *a, const void *b)
+{
+	unsigned int ra = *(const unsigned int *)a, rb = *(const unsigned int *)b;
+	unsigned int j;
+	for (j = 0; j < loo_sort_p; j++)
+	{
+		int va = (int)loo_sort_d[ra + (R_xlen_t)j * loo_sort_n];
+		int vb = (int)loo_sort_d[rb + (R_xlen_t)j * loo_sort_n];
+		if (va != vb)
+			return (va < vb) ? -1 : 1;
+	}
+	return (ra < rb) ? -1 : (ra > rb);
+}
+
+static void loo_sort_rows(const unsigned int *d, unsigned int n_ex, unsigned int n_nodes, unsigned int *ord)
+{
+	loo_sort_d = d;
+	loo_sort_n = n_ex;
+	loo_sort_p = n_nodes;
+	qsort(ord, n_ex, sizeof(unsigned int), loo_row_cmp);
+	loo_sort_d = NULL;
+}
+
+static int loo_rows_equal(const unsigned int *d, unsigned int n_ex, unsigned int n_nodes, unsigned int ra, unsigned int rb)
+{
+	unsigned int j;
+	for (j = 0; j < n_nodes; j++)
+		if (d[ra + (R_xlen_t)j * n_ex] != d[rb + (R_xlen_t)j * n_ex])
+			return 0;
+	return 1;
+}
+
 /* f(x) = x log x - (x-1) log(x-1), the per-cell term of the BIC/AIC removal
  * delta (0 log 0 = 0, so f(1) = 0). The log-likelihood part of removing one
  * row from cell (j,k) is f(n_ij) - f(n_ijk). */
@@ -582,9 +622,22 @@ SEXP bnstruct_loo_parents_score(SEXP data, SEXP node_sizes, SEXP imp_fam_mask, S
 	int *sinks = (int *)R_alloc(pow_nodes, sizeof(int));
 	double *fsc = (double *)R_alloc(pow_nodes, sizeof(double));
 
+	/* The optimum on D \ {o} depends on o only through its values: the row enters
+	 * phase 2 solely through the cells it occupies. Rows are therefore grouped by
+	 * pattern (missing values included), the DP runs once per distinct pattern, and
+	 * the result is copied to every row of the group. Exact: identical output. */
+	unsigned int *ord = (unsigned int *)R_alloc(n_ex, sizeof(unsigned int));
+	unsigned int g, h;
+	for (g = 0; g < n_ex; g++)
+		ord[g] = g;
+	loo_sort_rows(d, n_ex, n_nodes, ord);
+
 	unsigned int o;
-	for (o = 0; o < n_ex; o++)
+	for (g = 0; g < n_ex; g = h)
 	{
+		o = ord[g];
+		for (h = g + 1; h < n_ex && loo_rows_equal(d, n_ex, n_nodes, ord[g], ord[h]); h++)
+			;
 		R_xlen_t t;
 		for (t = 0; t < nfam; t++)
 			A[t] = aflml[t];
@@ -683,6 +736,12 @@ SEXP bnstruct_loo_parents_score(SEXP data, SEXP node_sizes, SEXP imp_fam_mask, S
 			out[o + (R_xlen_t)sink * n_ex] = ps - 1;
 			S = nop;
 		}
+
+		/* same pattern, same optimum */
+		unsigned int u;
+		for (u = g + 1; u < h; u++)
+			for (i = 0; i < n_nodes; i++)
+				out[ord[u] + (R_xlen_t)i * n_ex] = out[o + (R_xlen_t)i * n_ex];
 	}
 
 	UNPROTECT(1);
@@ -1244,3 +1303,528 @@ SEXP llna( SEXP parents, int node, SEXP node_sizes, double iss, SEXP data )
 
 }
 */
+
+/* ------------------------------------------------------------------------------------
+ * Coupled parent-set margins for every (node, candidate set): condition 3 of the CPDAG
+ * certificate, computed once for all (i, U) instead of per reachable decision.
+ *
+ *   margin(i,U) = min over admissible P subset of U, P != P* = bps[i,U] - 1, of
+ *                 s(P*) - s(P) + min_k [ lower_k(i,P*) - upper_k(i,P) ]
+ *
+ * The minima over P and over k commute, so for a common set K of child values
+ *
+ *   margin(i,U) = min_{k in K} [ s(P*) + lower_k(i,P*) - max_{P subset U, P != P*} (s(P) + upper_k(i,P)) ]
+ *
+ * and the maximum over the subsets of U excluding P* is a top-2 subset-maximum DP:
+ * Theta(r p^2 2^p) for every (i, U). K must be the set of child values whose per-value
+ * bounds are finite, and it must be the same for every admissible family of node i
+ * (it is whenever each observed value occurs in some row, complete or not). A node
+ * where that fails, or where K is empty, is handled by enumerating the submasks of
+ * each U with the rule of sm_coupled_parent_witness. For the minimising competitor
+ * the margin is recomputed with that rule, so values match the R witness.
+ * The decoupled margin s(P*) - s(P) + lower(i,P*) - upper(i,P) (diagnostics) is
+ * computed the same way.
+ *
+ * Returns list(margin, coupled, competitor, decoupled), each n_nodes x pow_nodes;
+ * competitor is the 1-based column index of the minimising P; NA where the winning
+ * family is infeasible or has no admissible competitor.
+ * ------------------------------------------------------------------------------------ */
+static void subset_top2(unsigned int n_nodes, unsigned int pow_nodes, unsigned int node,
+						const double *v, const int *ifm, double *b1, int *a1, double *b2, int *a2)
+{
+	unsigned int U, b;
+	for (U = 0; U < pow_nodes; U++)
+	{
+		if (U & (1U << node))
+			continue;
+		double x1 = R_NegInf, x2 = R_NegInf;
+		int i1 = -1, i2 = -1;
+		if (ifm[(R_xlen_t)U * n_nodes + node])
+			update_best_pair(v[U], (int)U, &x1, &i1, &x2, &i2);
+		for (b = 0; b < n_nodes; b++)
+			if (U & (1U << b))
+			{
+				unsigned int V = U ^ (1U << b);
+				update_best_pair(b1[V], a1[V], &x1, &i1, &x2, &i2);
+				update_best_pair(b2[V], a2[V], &x1, &i1, &x2, &i2);
+			}
+		b1[U] = x1; a1[U] = i1; b2[U] = x2; a2[U] = i2;
+	}
+}
+
+SEXP bnstruct_coupled_parent_margins(SEXP aflml_s, SEXP bps_s, SEXP ifm_s, SEXP node_sizes,
+									 SEXP lower_k_s, SEXP upper_k_s, SEXP lower_s, SEXP upper_s)
+{
+	unsigned int n_nodes = nrows(aflml_s), pow_nodes = ncols(aflml_s);
+	const double *s = REAL(aflml_s), *lk = REAL(lower_k_s), *uk = REAL(upper_k_s);
+	const double *lo = REAL(lower_s), *up = REAL(upper_s);
+	const int *bps = INTEGER(bps_s), *ifm = INTEGER(ifm_s), *ns = INTEGER(node_sizes);
+	int max_r = INTEGER(getAttrib(lower_k_s, R_DimSymbol))[2];
+	R_xlen_t npk = (R_xlen_t)n_nodes * pow_nodes;
+
+	SEXP res, margin_s, coupled_s, comp_s, dec_s, names;
+	PROTECT(margin_s = allocMatrix(REALSXP, n_nodes, pow_nodes));
+	PROTECT(coupled_s = allocMatrix(REALSXP, n_nodes, pow_nodes));
+	PROTECT(comp_s = allocMatrix(INTSXP, n_nodes, pow_nodes));
+	PROTECT(dec_s = allocMatrix(REALSXP, n_nodes, pow_nodes));
+	double *margin = REAL(margin_s), *coupled = REAL(coupled_s), *dec = REAL(dec_s);
+	int *comp = INTEGER(comp_s);
+	R_xlen_t t;
+	for (t = 0; t < npk; t++)
+	{
+		margin[t] = NA_REAL; coupled[t] = NA_REAL; dec[t] = NA_REAL; comp[t] = NA_INTEGER;
+	}
+
+	double *v = (double *)R_alloc(pow_nodes, sizeof(double));
+	double *b1 = (double *)R_alloc(pow_nodes, sizeof(double)), *b2 = (double *)R_alloc(pow_nodes, sizeof(double));
+	int *a1 = (int *)R_alloc(pow_nodes, sizeof(int)), *a2 = (int *)R_alloc(pow_nodes, sizeof(int));
+	double *best = (double *)R_alloc(pow_nodes, sizeof(double));
+	int *best_arg = (int *)R_alloc(pow_nodes, sizeof(int));
+	int valid[max_r];
+
+	unsigned int i, U;
+	int k;
+#define LK(i, P, k) lk[(R_xlen_t)(i) + (R_xlen_t)(P) * n_nodes + (R_xlen_t)(k) * npk]
+#define UK(i, P, k) uk[(R_xlen_t)(i) + (R_xlen_t)(P) * n_nodes + (R_xlen_t)(k) * npk]
+	for (i = 0; i < n_nodes; i++)
+	{
+		int r = ns[i];
+		/* common set of child values with finite per-value bounds */
+		int common = 1, have_ref = 0, n_valid = 0;
+		unsigned int P;
+		for (P = 0; P < pow_nodes && common; P++)
+		{
+			if (!ifm[(R_xlen_t)P * n_nodes + i])
+				continue;
+			for (k = 0; k < r; k++)
+			{
+				int f = R_FINITE(LK(i, P, k)) && R_FINITE(UK(i, P, k));
+				if (!have_ref)
+					valid[k] = f;
+				else if (valid[k] != f)
+				{
+					common = 0;
+					break;
+				}
+			}
+			have_ref = 1;
+		}
+		for (k = 0; k < r; k++)
+			n_valid += valid[k];
+
+		if (common && have_ref && n_valid > 0)
+		{
+			for (U = 0; U < pow_nodes; U++)
+			{
+				best[U] = R_PosInf;
+				best_arg[U] = -1;
+			}
+			for (k = 0; k < r; k++)
+			{
+				if (!valid[k])
+					continue;
+				for (P = 0; P < pow_nodes; P++)
+					v[P] = s[(R_xlen_t)P * n_nodes + i] + UK(i, P, k);
+				subset_top2(n_nodes, pow_nodes, i, v, ifm, b1, a1, b2, a2);
+				for (U = 0; U < pow_nodes; U++)
+				{
+					if (U & (1U << i))
+						continue;
+					int ps = bps[(R_xlen_t)U * n_nodes + i] - 1;
+					double ss = s[(R_xlen_t)ps * n_nodes + i];
+					if (!R_FINITE(ss))
+						continue;
+					double ex = (a1[U] == ps) ? b2[U] : b1[U];
+					int exa = (a1[U] == ps) ? a2[U] : a1[U];
+					if (exa < 0)
+						continue;
+					double cand = ss + LK(i, ps, k) - ex;
+					if (cand < best[U])
+					{
+						best[U] = cand;
+						best_arg[U] = exa;
+					}
+				}
+			}
+			for (U = 0; U < pow_nodes; U++)
+			{
+				if ((U & (1U << i)) || best_arg[U] < 0)
+					continue;
+				int ps = bps[(R_xlen_t)U * n_nodes + i] - 1, pc = best_arg[U];
+				double cc = R_PosInf;
+				for (k = 0; k < r; k++)
+					if (valid[k] && LK(i, ps, k) - UK(i, pc, k) < cc)
+						cc = LK(i, ps, k) - UK(i, pc, k);
+				R_xlen_t pos = (R_xlen_t)U * n_nodes + i;
+				coupled[pos] = cc;
+				margin[pos] = s[(R_xlen_t)ps * n_nodes + i] - s[(R_xlen_t)pc * n_nodes + i] + cc;
+				comp[pos] = pc + 1;
+			}
+		}
+		else
+		{
+			/* explicit submask enumeration, rule of sm_coupled_parent_witness */
+			for (U = 0; U < pow_nodes; U++)
+			{
+				if (U & (1U << i))
+					continue;
+				int ps = bps[(R_xlen_t)U * n_nodes + i] - 1;
+				double ss = s[(R_xlen_t)ps * n_nodes + i];
+				if (!R_FINITE(ss))
+					continue;
+				double worst = R_PosInf, cc_at = NA_REAL;
+				int arg = -1;
+				unsigned int Q = U;
+				for (;;)
+				{
+					if (ifm[(R_xlen_t)Q * n_nodes + i] && (int)Q != ps)
+					{
+						double cc = R_PosInf;
+						int any = 0;
+						for (k = 0; k < r; k++)
+							if (R_FINITE(LK(i, ps, k)) && R_FINITE(UK(i, Q, k)))
+							{
+								any = 1;
+								if (LK(i, ps, k) - UK(i, Q, k) < cc)
+									cc = LK(i, ps, k) - UK(i, Q, k);
+							}
+						if (!any)
+							cc = lo[(R_xlen_t)ps * n_nodes + i] - up[(R_xlen_t)Q * n_nodes + i];
+						double m = ss - s[(R_xlen_t)Q * n_nodes + i] + cc;
+						if (m < worst)
+						{
+							worst = m;
+							arg = (int)Q;
+							cc_at = cc;
+						}
+					}
+					if (Q == 0)
+						break;
+					Q = (Q - 1) & U;
+				}
+				if (arg >= 0 && R_FINITE(worst))
+				{
+					R_xlen_t pos = (R_xlen_t)U * n_nodes + i;
+					margin[pos] = worst;
+					coupled[pos] = cc_at;
+					comp[pos] = arg + 1;
+				}
+			}
+		}
+
+		/* decoupled margin (diagnostics): same DP with family-wide bounds */
+		{
+			unsigned int P2;
+			for (P2 = 0; P2 < pow_nodes; P2++)
+				v[P2] = s[(R_xlen_t)P2 * n_nodes + i] + up[(R_xlen_t)P2 * n_nodes + i];
+			subset_top2(n_nodes, pow_nodes, i, v, ifm, b1, a1, b2, a2);
+			for (U = 0; U < pow_nodes; U++)
+			{
+				if (U & (1U << i))
+					continue;
+				int ps = bps[(R_xlen_t)U * n_nodes + i] - 1;
+				double ss = s[(R_xlen_t)ps * n_nodes + i];
+				if (!R_FINITE(ss))
+					continue;
+				int exa = (a1[U] == ps) ? a2[U] : a1[U];
+				if (exa < 0)
+					continue;
+				dec[(R_xlen_t)U * n_nodes + i] = ss - s[(R_xlen_t)exa * n_nodes + i] +
+												 lo[(R_xlen_t)ps * n_nodes + i] - up[(R_xlen_t)exa * n_nodes + i];
+			}
+		}
+	}
+#undef LK
+#undef UK
+
+	PROTECT(res = allocVector(VECSXP, 4));
+	PROTECT(names = allocVector(STRSXP, 4));
+	SET_VECTOR_ELT(res, 0, margin_s);
+	SET_VECTOR_ELT(res, 1, coupled_s);
+	SET_VECTOR_ELT(res, 2, comp_s);
+	SET_VECTOR_ELT(res, 3, dec_s);
+	SET_STRING_ELT(names, 0, mkChar("margin"));
+	SET_STRING_ELT(names, 1, mkChar("coupled"));
+	SET_STRING_ELT(names, 2, mkChar("competitor"));
+	SET_STRING_ELT(names, 3, mkChar("decoupled"));
+	setAttrib(res, R_NamesSymbol, names);
+	UNPROTECT(6);
+	return res;
+}
+
+/* ------------------------------------------------------------------------------------
+ * Exact per-family coupling for the coupled sink condition of the CPDAG certificate:
+ *
+ *   c(i, R, P) = min over rows o of [ Delta(i, R, o) - Delta(i, P, o) ]
+ *
+ * where Delta is the one-row removal delta of the selected score (0 when the row is
+ * incomplete in the family), for every node i, every admissible family P of i and
+ * every reference parent set R = refs[i, t] (column t = one witness network).
+ * c(i, R, R) = 0 exactly. Rows enter only through their distinct patterns: each family
+ * is counted over all rows once, then evaluated at one representative row per pattern.
+ * Returns list(values, ref_index): values[i, P + 1, ref_index[i, t] + 1] is the
+ * coupling of node i, family P and witness column t; inadmissible entries are 0.
+ * ------------------------------------------------------------------------------------ */
+static void family_pattern_deltas(const unsigned int *d, unsigned int n_ex, unsigned int n_nodes,
+								  const int *ns, unsigned int i, unsigned int sset, double alpha,
+								  int scoring_func, const unsigned int *reps, unsigned int n_reps,
+								  unsigned int *pa, double *out)
+{
+	unsigned int npa = get_bits(sset, pa, n_nodes), k, ex, u;
+	int r_i = ns[i];
+	int cum[npa + 2];
+	R_xlen_t strides[npa + 1];
+	int q = 1;
+	cum[0] = 1;
+	cum[1] = r_i;
+	for (k = 0; k < npa; k++)
+	{
+		cum[k + 2] = cum[k + 1] * ns[pa[k]];
+		q *= ns[pa[k]];
+	}
+	strides[0] = (R_xlen_t)i * n_ex;
+	for (k = 0; k < npa; k++)
+		strides[k + 1] = (R_xlen_t)pa[k] * n_ex;
+
+	int ncells = q * r_i;
+	double *counts = (double *)calloc(ncells, sizeof(double));
+	double *nij = (double *)calloc(q, sizeof(double));
+	if (counts == NULL || nij == NULL)
+		error("memory allocation failed in bnstruct_coupling_rows");
+	for (ex = 0; ex < n_ex; ex++)
+	{
+		int index = 0;
+		unsigned int jj;
+		for (jj = 0; jj < npa + 1; jj++)
+		{
+			int elmt = (int)d[ex + strides[jj]];
+			if (elmt == NA_INTEGER)
+				break;
+			index += (elmt - 1) * cum[jj];
+		}
+		if (jj < npa + 1)
+			continue;
+		counts[index] += 1;
+	}
+	double n_fam = 0.0;
+	int c;
+	for (c = 0; c < ncells; c++)
+	{
+		n_fam += counts[c];
+		nij[c / r_i] += counts[c];
+	}
+	double a_ij = alpha / (double)q, a_ijk = alpha / (double)(q * r_i);
+	double pen_relief = 0.0;
+	if (scoring_func == 2 && n_fam >= 2.0)
+		pen_relief = 0.5 * (double)q * (double)(r_i - 1) * log(n_fam / (n_fam - 1.0));
+
+	for (u = 0; u < n_reps; u++)
+	{
+		unsigned int o = reps[u], jj;
+		int index = 0;
+		for (jj = 0; jj < npa + 1; jj++)
+		{
+			int elmt = (int)d[o + strides[jj]];
+			if (elmt == NA_INTEGER)
+				break;
+			index += (elmt - 1) * cum[jj];
+		}
+		if (jj < npa + 1)
+		{
+			out[u] = 0.0;
+			continue;
+		}
+		double n1 = nij[index / r_i], n2 = counts[index];
+		out[u] = (scoring_func == 0) ? log(a_ij + n1 - 1.0) - log(a_ijk + n2 - 1.0)
+									 : loo_f_cell(n1) - loo_f_cell(n2) + pen_relief;
+	}
+	free(counts);
+	free(nij);
+}
+
+SEXP bnstruct_coupling_rows(SEXP data, SEXP node_sizes, SEXP imp_fam_mask, SEXP ess, SEXP func, SEXP refs_s)
+{
+	const unsigned int *d = (const unsigned int *)INTEGER(data);
+	unsigned int n_ex = nrows(data), n_nodes = ncols(data);
+	const int *ns = INTEGER(node_sizes), *ifm = INTEGER(imp_fam_mask), *refs = INTEGER(refs_s);
+	unsigned int pow_nodes = ncols(imp_fam_mask), n_refs = ncols(refs_s);
+	double alpha = *REAL(ess);
+	int scoring_func = *INTEGER(func);
+	unsigned int *pa = (unsigned int *)R_alloc(n_nodes, sizeof(unsigned int));
+
+	/* one representative row per distinct pattern */
+	unsigned int *ord = (unsigned int *)R_alloc(n_ex > 0 ? n_ex : 1, sizeof(unsigned int));
+	unsigned int *reps = (unsigned int *)R_alloc(n_ex > 0 ? n_ex : 1, sizeof(unsigned int));
+	unsigned int g, h, n_reps = 0;
+	for (g = 0; g < n_ex; g++)
+		ord[g] = g;
+	if (n_ex > 0)
+		loo_sort_rows(d, n_ex, n_nodes, ord);
+	for (g = 0; g < n_ex; g = h)
+	{
+		reps[n_reps++] = ord[g];
+		for (h = g + 1; h < n_ex && loo_rows_equal(d, n_ex, n_nodes, ord[g], ord[h]); h++)
+			;
+	}
+
+	/* distinct reference sets per node: ref_index[i, t] = position of refs[i, t] among
+	 * node i's distinct references (0-based); the value array holds one slice per
+	 * distinct reference, so memory is n_nodes x pow_nodes x (max distinct references) */
+	SEXP ref_index_s;
+	PROTECT(ref_index_s = allocMatrix(INTSXP, n_nodes, n_refs));
+	int *ref_index = INTEGER(ref_index_s);
+	unsigned int *distinct = (unsigned int *)R_alloc((R_xlen_t)n_nodes * (n_refs > 0 ? n_refs : 1), sizeof(unsigned int));
+	unsigned int *n_dist = (unsigned int *)R_alloc(n_nodes, sizeof(unsigned int));
+	unsigned int i, m, P, u, max_dist = 1;
+	R_xlen_t t;
+	for (i = 0; i < n_nodes; i++)
+	{
+		n_dist[i] = 0;
+		for (t = 0; t < (R_xlen_t)n_refs; t++)
+		{
+			unsigned int R = (unsigned int)refs[(R_xlen_t)i + t * n_nodes];
+			for (m = 0; m < n_dist[i] && distinct[(R_xlen_t)i * n_refs + m] != R; m++)
+				;
+			if (m == n_dist[i])
+				distinct[(R_xlen_t)i * n_refs + n_dist[i]++] = R;
+			ref_index[(R_xlen_t)i + t * n_nodes] = (int)m;
+		}
+		if (n_dist[i] > max_dist)
+			max_dist = n_dist[i];
+	}
+
+	SEXP vals_s, dim, res, names;
+	PROTECT(vals_s = allocVector(REALSXP, (R_xlen_t)n_nodes * pow_nodes * max_dist));
+	PROTECT(dim = allocVector(INTSXP, 3));
+	INTEGER(dim)[0] = n_nodes;
+	INTEGER(dim)[1] = pow_nodes;
+	INTEGER(dim)[2] = max_dist;
+	setAttrib(vals_s, R_DimSymbol, dim);
+	double *out = REAL(vals_s);
+	R_xlen_t npk = (R_xlen_t)n_nodes * pow_nodes;
+	for (t = 0; t < npk * max_dist; t++)
+		out[t] = 0.0;
+
+	double *dP = (double *)R_alloc(n_reps > 0 ? n_reps : 1, sizeof(double));
+	double *dR = (double *)R_alloc((n_reps > 0 ? n_reps : 1) * (R_xlen_t)max_dist, sizeof(double));
+	for (i = 0; i < n_nodes; i++)
+	{
+		for (m = 0; m < n_dist[i]; m++)
+			family_pattern_deltas(d, n_ex, n_nodes, ns, i, distinct[(R_xlen_t)i * n_refs + m], alpha,
+								  scoring_func, reps, n_reps, pa, dR + (R_xlen_t)m * n_reps);
+		for (P = 0; P < pow_nodes; P++)
+		{
+			if (!ifm[(R_xlen_t)P * n_nodes + i])
+				continue;
+			family_pattern_deltas(d, n_ex, n_nodes, ns, i, P, alpha, scoring_func, reps, n_reps, pa, dP);
+			for (m = 0; m < n_dist[i]; m++)
+			{
+				double c = 0.0;
+				if (distinct[(R_xlen_t)i * n_refs + m] != P && n_reps > 0)
+				{
+					c = R_PosInf;
+					for (u = 0; u < n_reps; u++)
+					{
+						double x = dR[(R_xlen_t)m * n_reps + u] - dP[u];
+						if (x < c)
+							c = x;
+					}
+				}
+				out[(R_xlen_t)i + (R_xlen_t)P * n_nodes + (R_xlen_t)m * npk] = c;
+			}
+		}
+	}
+
+	PROTECT(res = allocVector(VECSXP, 2));
+	PROTECT(names = allocVector(STRSXP, 2));
+	SET_VECTOR_ELT(res, 0, vals_s);
+	SET_VECTOR_ELT(res, 1, ref_index_s);
+	SET_STRING_ELT(names, 0, mkChar("values"));
+	SET_STRING_ELT(names, 1, mkChar("ref_index"));
+	setAttrib(res, R_NamesSymbol, names);
+	UNPROTECT(5);
+	return res;
+}
+
+/* ------------------------------------------------------------------------------------
+ * Parent-set margins with the exact per-row coupling:
+ *
+ *   margin(i,U) = min over admissible P subset of U, P != R, of  s(R) - s(P) + c(i, R, P),
+ *   R = P*(U) = bps[i,U] - 1,  c(i, R, P) = min over rows of Delta(i,R,o) - Delta(i,P,o),
+ *
+ * a lower bound on min_o [ s_{D\o}(R) - s_{D\o}(P) ] (so margin > 0 keeps R optimal among
+ * the subsets of U under every single removal). For each node i and each distinct
+ * reference R_m (values[i, , m], from bnstruct_coupling_rows), a top-2 subset-maximum DP
+ * of s(P) - c(i, R_m, P) gives the margin at every U whose best parent set is R_m.
+ * refs[i, t] / ref_index[i, t] list the references and their slices; only U with
+ * bps[i,U] - 1 among node i's references are filled. Returns list(margin, competitor)
+ * (competitor = 1-based column index), NA elsewhere.
+ * ------------------------------------------------------------------------------------ */
+SEXP bnstruct_parent_margins_rows(SEXP aflml_s, SEXP bps_s, SEXP ifm_s, SEXP values_s, SEXP refs_s, SEXP ref_index_s)
+{
+	unsigned int n_nodes = nrows(aflml_s), pow_nodes = ncols(aflml_s), n_refs = ncols(refs_s);
+	const double *s = REAL(aflml_s), *vals = REAL(values_s);
+	const int *bps = INTEGER(bps_s), *ifm = INTEGER(ifm_s), *refs = INTEGER(refs_s), *ridx = INTEGER(ref_index_s);
+	R_xlen_t npk = (R_xlen_t)n_nodes * pow_nodes, t;
+
+	SEXP res, margin_s, comp_s, names;
+	PROTECT(margin_s = allocMatrix(REALSXP, n_nodes, pow_nodes));
+	PROTECT(comp_s = allocMatrix(INTSXP, n_nodes, pow_nodes));
+	double *margin = REAL(margin_s);
+	int *comp = INTEGER(comp_s);
+	for (t = 0; t < npk; t++)
+	{
+		margin[t] = NA_REAL;
+		comp[t] = NA_INTEGER;
+	}
+	double *v = (double *)R_alloc(pow_nodes, sizeof(double));
+	double *b1 = (double *)R_alloc(pow_nodes, sizeof(double)), *b2 = (double *)R_alloc(pow_nodes, sizeof(double));
+	int *a1 = (int *)R_alloc(pow_nodes, sizeof(int)), *a2 = (int *)R_alloc(pow_nodes, sizeof(int));
+
+	unsigned int i, P, U;
+	for (i = 0; i < n_nodes; i++)
+	{
+		/* distinct slices used by node i */
+		for (t = 0; t < (R_xlen_t)n_refs; t++)
+		{
+			int m = ridx[(R_xlen_t)i + t * n_nodes], R = refs[(R_xlen_t)i + t * n_nodes];
+			R_xlen_t t2;
+			int seen = 0;
+			for (t2 = 0; t2 < t; t2++)
+				if (ridx[(R_xlen_t)i + t2 * n_nodes] == m)
+				{
+					seen = 1;
+					break;
+				}
+			if (seen)
+				continue;
+			double sR = s[(R_xlen_t)R * n_nodes + i];
+			if (!R_FINITE(sR))
+				continue;
+			for (P = 0; P < pow_nodes; P++)
+				v[P] = s[(R_xlen_t)P * n_nodes + i] - vals[(R_xlen_t)i + (R_xlen_t)P * n_nodes + (R_xlen_t)m * npk];
+			subset_top2(n_nodes, pow_nodes, i, v, ifm, b1, a1, b2, a2);
+			for (U = 0; U < pow_nodes; U++)
+			{
+				if ((U & (1U << i)) || bps[(R_xlen_t)U * n_nodes + i] - 1 != R)
+					continue;
+				int exa = (a1[U] == R) ? a2[U] : a1[U];
+				if (exa < 0)
+					continue;
+				R_xlen_t pos = (R_xlen_t)U * n_nodes + i;
+				margin[pos] = sR - s[(R_xlen_t)exa * n_nodes + i] +
+							  vals[(R_xlen_t)i + (R_xlen_t)exa * n_nodes + (R_xlen_t)m * npk];
+				comp[pos] = exa + 1;
+			}
+		}
+	}
+	PROTECT(res = allocVector(VECSXP, 2));
+	PROTECT(names = allocVector(STRSXP, 2));
+	SET_VECTOR_ELT(res, 0, margin_s);
+	SET_VECTOR_ELT(res, 1, comp_s);
+	SET_STRING_ELT(names, 0, mkChar("margin"));
+	SET_STRING_ELT(names, 1, mkChar("competitor"));
+	setAttrib(res, R_NamesSymbol, names);
+	UNPROTECT(4);
+	return res;
+}

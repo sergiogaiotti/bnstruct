@@ -23,6 +23,9 @@ extern SEXP bnstruct_compute_lg_ug_tight(SEXP, SEXP, SEXP, SEXP, SEXP);
 extern SEXP bnstruct_compute_lf_uf(SEXP, SEXP, SEXP, SEXP, SEXP, SEXP);
 extern SEXP bnstruct_loo_parents(SEXP, SEXP, SEXP, SEXP, SEXP);
 extern SEXP bnstruct_loo_parents_score(SEXP, SEXP, SEXP, SEXP, SEXP, SEXP);
+extern SEXP bnstruct_coupled_parent_margins(SEXP, SEXP, SEXP, SEXP, SEXP, SEXP, SEXP, SEXP);
+extern SEXP bnstruct_coupling_rows(SEXP, SEXP, SEXP, SEXP, SEXP, SEXP);
+extern SEXP bnstruct_parent_margins_rows(SEXP, SEXP, SEXP, SEXP, SEXP, SEXP);
 extern SEXP bnstruct_compute_bf(SEXP);
 extern SEXP bnstruct_fumt_mask(SEXP, SEXP);
 extern SEXP bnstruct_g2_stat(SEXP, SEXP);
@@ -59,6 +62,9 @@ static const R_CallMethodDef CallEntries[] = {
     {"bnstruct_compute_lf_uf", (DL_FUNC)&bnstruct_compute_lf_uf, 6},
     {"bnstruct_loo_parents", (DL_FUNC)&bnstruct_loo_parents, 5},
     {"bnstruct_loo_parents_score", (DL_FUNC)&bnstruct_loo_parents_score, 6},
+    {"bnstruct_coupled_parent_margins", (DL_FUNC)&bnstruct_coupled_parent_margins, 8},
+    {"bnstruct_coupling_rows", (DL_FUNC)&bnstruct_coupling_rows, 6},
+    {"bnstruct_parent_margins_rows", (DL_FUNC)&bnstruct_parent_margins_rows, 6},
     {"bnstruct_compute_bf", (DL_FUNC)&bnstruct_compute_bf, 1},
     {"bnstruct_fumt_mask", (DL_FUNC)&bnstruct_fumt_mask, 2},
     {"bnstruct_g2_stat", (DL_FUNC)&bnstruct_g2_stat, 2},

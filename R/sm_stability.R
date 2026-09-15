@@ -344,7 +344,16 @@ sm_decoupled_parent_margin <- function(i_star, U_mask, aflml, bps, ifm,
 sm_cpdag_certificate <- function(aflml, bps, F, ifm, lower_delta, upper_delta,
                                  lower_k, upper_k, node.sizes,
                                  Lg, Ug, LF, UF, dag, n.nodes, eps = 1e-9,
-                                 diagnostics = FALSE) {
+                                 diagnostics = FALSE,
+                                 sink = c("decoupled", "coupled"),
+                                 data = NULL, ess = 1, scoring.func = 0L,
+                                 witness.cap = 64L,
+                                 parent = c("child", "rows")) {
+    sink <- match.arg(sink)
+    parent <- match.arg(parent)
+    if ((sink == "coupled" || parent == "rows") && is.null(data)) {
+        stop("sink = 'coupled' and parent = 'rows' require the data.")
+    }
     bit <- 2^(seq_len(n.nodes) - 1)
     base_key <- sm_cpdag_key(dag)
 
@@ -365,6 +374,110 @@ sm_cpdag_certificate <- function(aflml, bps, F, ifm, lower_delta, upper_delta,
     # decision; the default path stores nothing.
     sink_diag <- if (diagnostics) list() else NULL
     parent_diag <- if (diagnostics) list() else NULL
+
+    # Condition 3 for every (node, candidate set) at once: the coupled parent margin
+    # of sm_coupled_parent_witness, computed by a subset-maximum DP in C
+    # (bnstruct_coupled_parent_margins), then looked up per reachable decision.
+    storage.mode(ifm) <- "integer"
+    storage.mode(bps) <- "integer"
+    pm <- .Call(
+        "bnstruct_coupled_parent_margins",
+        aflml, bps, ifm, as.integer(node.sizes), lower_k, upper_k, lower_delta, upper_delta,
+        PACKAGE = "bnstruct"
+    )
+
+    # Coupled sink condition (Theorem "coupled sink condition"): for a network G on S
+    # with a sink among the tied winners and every strict competitor j,
+    #   min_o [ max_w A_w(S; D\o) - A_j(S; D\o) ] >= Score(G) - At_j(S),
+    # where At_j(S) is the decision value recomputed on local scores
+    #   st(i, P) = s(i, P) - c(i, Pa^G_i, P),  c = min over rows of
+    #   Delta(i, Pa^G_i, o) - Delta(i, P, o)   (exact per family, 0 when P = Pa^G_i).
+    # Witnesses G are the enumerated optimal DAGs (at most witness.cap); one DP per
+    # witness serves every subset on which it restricts to a network. Per competitor the
+    # certificate uses the larger of this bound and the decoupled bound.
+    # Row-coupled terms c(i, R, P) = min over rows of Delta(i,R,o) - Delta(i,P,o) are
+    # needed for R = each witness's parent sets (coupled sink condition) and for R = the
+    # best parent set of each reachable parent decision (parent = "rows"); one counting
+    # pass (bnstruct_coupling_rows) serves both.
+    bitv <- 2^(seq_len(n.nodes) - 1)
+    refs <- matrix(0L, n.nodes, 0)
+    witnesses <- list()
+    n_wit <- 0L
+    if (sink == "coupled") {
+        witnesses <- utils::head(enum$dags, witness.cap)
+        n_wit <- length(witnesses)
+        wpa <- matrix(0L, n.nodes, n_wit)
+        for (t in seq_len(n_wit)) {
+            wpa[, t] <- vapply(seq_len(n.nodes), function(v) {
+                as.integer(sum(bitv[witnesses[[t]][, v] == 1L]))
+            }, integer(1))
+        }
+        refs <- cbind(refs, wpa)
+    }
+    if (parent == "rows") {
+        pstar <- lapply(seq_len(n.nodes), function(i) integer(0))
+        for (S in vis$subsets) for (w in vis$winfo[[S + 1]]$winners) {
+            U <- bitXor(S, bit[w])
+            pstar[[w]] <- union(pstar[[w]], as.integer(bps[w, U + 1] - 1L))
+        }
+        width <- max(1L, max(lengths(pstar)))
+        pref <- vapply(pstar, function(x) as.integer(rep_len(if (length(x)) x else 0L, width)), integer(width))
+        refs <- cbind(refs, matrix(pref, nrow = n.nodes, byrow = TRUE))
+    }
+    cpl <- NULL
+    if (ncol(refs) > 0) {
+        storage.mode(refs) <- "integer"
+        cpl <- .Call(
+            "bnstruct_coupling_rows",
+            data, as.integer(node.sizes), ifm, as.numeric(ess), as.integer(scoring.func), refs,
+            PACKAGE = "bnstruct"
+        )
+    }
+    pm_rows <- NULL
+    if (parent == "rows") {
+        pm_rows <- .Call(
+            "bnstruct_parent_margins_rows",
+            aflml, bps, ifm, cpl$values, refs, cpl$ref_index,
+            PACKAGE = "bnstruct"
+        )
+    }
+    if (sink == "coupled") {
+        # best coupled bound per (subset, competitor) over the witnesses, filled one
+        # witness at a time so that memory stays O(p 2^p) whatever the witness count
+        coupled_best <- matrix(-Inf, 2^n.nodes, n.nodes)
+        coupled_valid <- logical(2^n.nodes)
+        if (n_wit > 0) {
+            fin <- is.finite(aflml)
+            rows_idx <- rep(seq_len(n.nodes), ncol(aflml))
+            cols_idx <- rep(seq_len(ncol(aflml)), each = n.nodes)
+            for (t in seq_len(n_wit)) {
+                cc <- matrix(cpl$values[cbind(rows_idx, cols_idx, rep(cpl$ref_index[, t] + 1L, ncol(aflml)))], n.nodes)
+                st <- aflml
+                st[fin] <- aflml[fin] - cc[fin]
+                bps_t <- .Call("bnstruct_fbp", aflml = st, PACKAGE = "bnstruct")
+                F_t <- .Call("bnstruct_fbs_with_scores", bps = bps_t, aflml = st, PACKAGE = "bnstruct")$scores
+                fam_t <- aflml[cbind(seq_len(n.nodes), wpa[, t] + 1)]
+                for (S in vis$subsets) {
+                    info <- vis$winfo[[S + 1]]
+                    nodes <- info$nodes
+                    winners <- info$winners
+                    if (length(nodes) < 2 || length(winners) == length(nodes)) next
+                    pa_t <- wpa[nodes, t]
+                    if (any(bitwAnd(pa_t, bitwNot(S)) != 0)) next
+                    has_child <- Reduce(bitwOr, pa_t, 0L)
+                    if (!any(nodes[bitwAnd(has_child, bitv[nodes]) == 0] %in% winners)) next
+                    coupled_valid[S + 1] <- TRUE
+                    scoreS <- sum(fam_t[nodes])
+                    for (j in setdiff(nodes, winners)) {
+                        U <- bitXor(S, bit[j])
+                        b <- scoreS - (F_t[U + 1] + st[j, max(bps_t[j, U + 1], 1L)])
+                        if (b > coupled_best[S + 1, j]) coupled_best[S + 1, j] <- b
+                    }
+                }
+            }
+        }
+    }
+    uncovered_pairs <- 0L
 
     for (S in vis$subsets) {
         info <- vis$winfo[[S + 1]]
@@ -398,14 +511,34 @@ sm_cpdag_certificate <- function(aflml, bps, F, ifm, lower_delta, upper_delta,
                     A_jrisk <- A_j; UF_r <- UF_j; Ug_r <- Ug_j
                 }
             }
-            if (!is.finite(lhs) || !is.finite(rhs) || lhs <= rhs) {
+            sink_margin <- lhs - rhs
+            coupled_margin <- NA_real_
+            if (sink == "coupled") {
+                # per competitor: the larger of the decoupled and the best coupled bound
+                per_j <- vapply(strict, function(j) {
+                    U <- bitXor(S, bit[j])
+                    old_j <- lhs - (F[U + 1] + aflml[j, bps[j, U + 1]] + UF[U + 1] + Ug[j, U + 1])
+                    c(old_j, coupled_best[S + 1, j])
+                }, numeric(2))
+                if (!coupled_valid[S + 1]) uncovered_pairs <- uncovered_pairs + length(strict)
+                best_j <- pmax(per_j[1, ], per_j[2, ])
+                coupled_margin <- min(per_j[2, ])
+                sink_margin <- min(best_j)
+                j_risk <- strict[which.min(best_j)]
+            }
+            fragile_sink <- if (sink == "coupled") {
+                is.na(sink_margin) || sink_margin <= 0
+            } else {
+                !is.finite(lhs) || !is.finite(rhs) || lhs <= rhs
+            }
+            if (fragile_sink) {
                 sink_fragile[[length(sink_fragile) + 1]] <- list(
                     subset = S,
                     winners = winners,
                     competitor = j_risk,
                     lhs = lhs,
                     rhs = rhs,
-                    gap = lhs - rhs,
+                    gap = sink_margin,
                     type = "sink_cpdag"
                 )
             }
@@ -413,35 +546,52 @@ sm_cpdag_certificate <- function(aflml, bps, F, ifm, lower_delta, upper_delta,
             if (diagnostics) {
                 sink_diag[[length(sink_diag) + 1]] <- data.frame(
                     subset = S, competitor = j_risk,
-                    margin = lhs - rhs,
+                    margin = sink_margin,
                     base_gap = A_wbest - A_jrisk,
-                    UF = UF_r, Ug = Ug_r, LA_win = LA_wbest
+                    UF = UF_r, Ug = Ug_r, LA_win = LA_wbest,
+                    margin_decoupled = lhs - rhs,
+                    margin_coupled_only = coupled_margin
                 )
             }
         }
 
         # Condition 3: family/parent decision stable for each optimal winner
-        # (coupled same-child-value margin).
+        # (coupled same-child-value margin), looked up in the table computed above.
         for (w in winners) {
             U <- bitXor(S, bit[w])
-            wt <- sm_coupled_parent_witness(
-                w, U, S, aflml, bps, ifm, node.sizes,
-                lower_k, upper_k, lower_delta, upper_delta
-            )
-            if (!is.null(wt)) {
-                if (isTRUE(wt$fragile)) {
-                    parent_fragile[[length(parent_fragile) + 1]] <- wt
+            m <- pm$margin[w, U + 1]
+            p_risk <- pm$competitor[w, U + 1]
+            if (parent == "rows") {
+                # both are valid lower bounds on the same perturbed parent-set gap; the
+                # row coupling is never looser, the maximum guards against missing entries
+                mr <- pm_rows$margin[w, U + 1]
+                if (!is.na(mr) && (is.na(m) || mr > m)) {
+                    m <- mr
+                    p_risk <- pm_rows$competitor[w, U + 1]
                 }
-                if (diagnostics) {
-                    dec <- sm_decoupled_parent_margin(
-                        w, U, aflml, bps, ifm, lower_delta, upper_delta
-                    )
-                    pstar_size <- sum(bitAnd(bps[w, U + 1] - 1, bit) > 0)
-                    parent_diag[[length(parent_diag) + 1]] <- data.frame(
-                        subset = S, node = w, pstar_size = pstar_size,
-                        margin_coupled = wt$margin, margin_decoupled = dec
-                    )
-                }
+            }
+            if (is.na(m)) next
+            p_star_idx <- bps[w, U + 1]
+            if (m <= 0) {
+                parent_fragile[[length(parent_fragile) + 1]] <- list(
+                    subset = S,
+                    node = w,
+                    best_parent_set = p_star_idx,
+                    competitor_parent_set = p_risk,
+                    s_best = aflml[w, p_star_idx],
+                    s_competitor = aflml[w, p_risk],
+                    coupled_term = if (parent == "rows") NA_real_ else pm$coupled[w, U + 1],
+                    margin = m,
+                    fragile = TRUE,
+                    type = "parent"
+                )
+            }
+            if (diagnostics) {
+                pstar_size <- sum(bitAnd(p_star_idx - 1, bit) > 0)
+                parent_diag[[length(parent_diag) + 1]] <- data.frame(
+                    subset = S, node = w, pstar_size = pstar_size,
+                    margin_coupled = m, margin_decoupled = pm$decoupled[w, U + 1]
+                )
             }
         }
     }
@@ -459,7 +609,11 @@ sm_cpdag_certificate <- function(aflml, bps, F, ifm, lower_delta, upper_delta,
         sink_fragile = sink_fragile,
         parent_fragile = parent_fragile,
         witnesses = c(sink_fragile, parent_fragile),
-        base_cpdag_key = base_key
+        base_cpdag_key = base_key,
+        sink = sink,
+        parent = parent,
+        n_witnesses = if (sink == "coupled") n_wit else NA_integer_,
+        uncovered_sink_pairs = if (sink == "coupled") uncovered_pairs else NA_integer_
     )
 
     if (diagnostics) {
@@ -583,7 +737,10 @@ sm_stability_bdeu <- function(
     diagnostics = FALSE,
     scoring.func = 0L,
     bound.supplied = FALSE,
-    scope.supplied = FALSE) {
+    scope.supplied = FALSE,
+    sink = c("decoupled", "coupled"),
+    witness.cap = 64L,
+    parent = c("child", "rows")) {
     # scoring.func: 0 = BDeu (ess used), 1 = AIC, 2 = BIC (ess ignored). Every
     # certificate below only needs (a) the per-family removal-delta bounds and
     # (b) delta >= 0 and score equivalence, all of which hold for the three
@@ -595,6 +752,14 @@ sm_stability_bdeu <- function(
     # would suggest a control the CPDAG certificate does not have.
     target <- match.arg(target)
     mode <- match.arg(mode)
+    sink <- match.arg(sink)
+    parent <- match.arg(parent)
+    if (sink == "coupled" && target != "cpdag") {
+        stop("stability.sink = 'coupled' is implemented only for stability.target = 'cpdag'.")
+    }
+    if (parent == "rows" && target != "cpdag") {
+        stop("stability.parent = 'rows' is implemented only for stability.target = 'cpdag'.")
+    }
     bound.type <- match.arg(bound.type)
     scope <- match.arg(scope)
     scoring.func <- as.integer(scoring.func)
@@ -681,7 +846,9 @@ sm_stability_bdeu <- function(
             aflml, bps, F, ifm, lower_delta, upper_delta,
             bounds$lower_k, bounds$upper_k, node.sizes,
             g_bounds$lower, g_bounds$upper, f_bounds$lower, f_bounds$upper,
-            dag, n.nodes, diagnostics = diagnostics
+            dag, n.nodes, diagnostics = diagnostics,
+            sink = sink, data = data, ess = ess, scoring.func = scoring.func,
+            witness.cap = witness.cap, parent = parent
         )
         cert$target <- "cpdag"
         cert$bound_type <- "asym_tight"

@@ -44,6 +44,11 @@ SEXP bnstruct_compute_lf_uf(SEXP F, SEXP sinks, SEXP bps, SEXP aflml, SEXP Lg, S
 SEXP bnstruct_loo_parents(SEXP data, SEXP node_sizes, SEXP imp_fam_mask, SEXP ess, SEXP aflml);
 SEXP bnstruct_loo_parents_score(SEXP data, SEXP node_sizes, SEXP imp_fam_mask, SEXP ess, SEXP aflml, SEXP func);
 
+/* coupled parent margins for every (node, candidate set) and exact per-family coupling for the sink condition */
+SEXP bnstruct_coupled_parent_margins(SEXP aflml, SEXP bps, SEXP imp_fam_mask, SEXP node_sizes, SEXP lower_k, SEXP upper_k, SEXP lower, SEXP upper);
+SEXP bnstruct_coupling_rows(SEXP data, SEXP node_sizes, SEXP imp_fam_mask, SEXP ess, SEXP func, SEXP refs);
+SEXP bnstruct_parent_margins_rows(SEXP aflml, SEXP bps, SEXP imp_fam_mask, SEXP values, SEXP refs, SEXP ref_index);
+
 /* compute BF bounds over subsets */
 SEXP bnstruct_compute_bf(SEXP Bg);
 

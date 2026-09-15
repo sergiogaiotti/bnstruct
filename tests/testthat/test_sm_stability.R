@@ -323,3 +323,184 @@ test_that("tied-optima enumeration visits each (subset, parents) state once", {
     expect_false(st$enumeration_truncated)
     expect_true(st$optimal_cpdag_unique)
 })
+
+# ---------------------------------------------------------------------------------------
+# condition 3 as a table, exact leave-one-out by row pattern, coupled sink condition
+# ---------------------------------------------------------------------------------------
+
+sm_na_data <- local({
+    set.seed(11)
+    X <- sm_small_data
+    X[sample(length(X), 25)] <- NA_integer_
+    X
+})
+
+test_that("bnstruct_coupled_parent_margins matches the per-decision R witness", {
+    for (case in list(list(sm_small_data, sm_small_sizes), list(sm_na_data, sm_small_sizes),
+                      list(sm_chain_data, sm_chain_sizes))) {
+        X <- case[[1]]; ns <- as.integer(case[[2]]); p <- ncol(X)
+        storage.mode(X) <- "integer"
+        ifm <- matrix(1L, p, 2^p)
+        for (i in seq_len(p)) ifm[i, bitwAnd(0:(2^p - 1), 2^(i - 1)) > 0] <- 0L
+        tab <- bnstruct:::sm(X, ns, return.tables = TRUE)
+        b <- .Call("bnstruct_score_loo_bounds", X, ns, ifm, 1.0, 0L, PACKAGE = "bnstruct")
+        cm <- .Call("bnstruct_coupled_parent_margins", tab$aflml, tab$bps, ifm, ns,
+                    b$lower_k, b$upper_k, b$lower, b$upper, PACKAGE = "bnstruct")
+        for (i in seq_len(p)) for (U in 0:(2^p - 1)) {
+            if (bitwAnd(U, 2^(i - 1)) > 0) next
+            w <- bnstruct:::sm_coupled_parent_witness(i, U, U, tab$aflml, tab$bps, ifm, ns,
+                                                      b$lower_k, b$upper_k, b$lower, b$upper)
+            if (is.null(w)) {
+                expect_true(is.na(cm$margin[i, U + 1]))
+            } else {
+                expect_equal(cm$margin[i, U + 1], w$margin, tolerance = 1e-9)
+                expect_identical(cm$margin[i, U + 1] <= 0, isTRUE(w$fragile))
+            }
+            dm <- bnstruct:::sm_decoupled_parent_margin(i, U, tab$aflml, tab$bps, ifm, b$lower, b$upper)
+            if (is.na(dm)) expect_true(is.na(cm$decoupled[i, U + 1])) else
+                expect_equal(cm$decoupled[i, U + 1], dm, tolerance = 1e-9)
+        }
+    }
+})
+
+test_that("exact leave-one-out gives one result per row pattern and matches re-learning", {
+    X <- rbind(sm_small_data, sm_small_data[rep(1:5, 20), ])     # many duplicated rows
+    storage.mode(X) <- "integer"; ns <- as.integer(sm_small_sizes); p <- ncol(X)
+    ifm <- matrix(1L, p, 2^p)
+    for (i in seq_len(p)) ifm[i, bitwAnd(0:(2^p - 1), 2^(i - 1)) > 0] <- 0L
+    tab <- bnstruct:::sm(X, ns, return.tables = TRUE)
+    PM <- .Call("bnstruct_loo_parents_score", X, ns, ifm, 1.0, tab$aflml, 0L, PACKAGE = "bnstruct")
+    key <- apply(X, 1, paste, collapse = ",")
+    for (k in unique(key[duplicated(key)])) {
+        rows <- which(key == k)
+        expect_true(all(PM[rows, , drop = FALSE] == matrix(PM[rows[1], ], length(rows), p, byrow = TRUE)))
+    }
+    perm <- sample(nrow(X))
+    PM2 <- .Call("bnstruct_loo_parents_score", X[perm, ], ns, ifm, 1.0, tab$aflml, 0L, PACKAGE = "bnstruct")
+    expect_true(all(PM2 == PM[perm, ]))
+    bit <- 2^(seq_len(p) - 1)
+    for (o in c(1, 2, nrow(X))) {
+        d2 <- bnstruct:::sm(X[-o, ], ns)
+        dk <- matrix(0L, p, p)
+        for (v in seq_len(p)) if (PM[o, v] > 0) dk[bitwAnd(PM[o, v], bit) > 0, v] <- 1L
+        expect_identical(sm_cpdag_key(dk), sm_cpdag_key(d2))
+    }
+})
+
+test_that("bnstruct_coupling_rows equals the per-row minimum of delta differences", {
+    X <- sm_na_data; storage.mode(X) <- "integer"; ns <- as.integer(sm_small_sizes); p <- ncol(X)
+    ifm <- matrix(1L, p, 2^p)
+    for (i in seq_len(p)) ifm[i, bitwAnd(0:(2^p - 1), 2^(i - 1)) > 0] <- 0L
+    refs <- cbind(rep(0L, p), vapply(seq_len(p), function(i) as.integer(2^(i %% p)), integer(1)))
+    crl <- .Call("bnstruct_coupling_rows", X, ns, ifm, 1.0, 0L, refs, PACKAGE = "bnstruct")
+    cr <- array(NA_real_, c(p, 2^p, 2))
+    for (t in 1:2) for (i in seq_len(p)) cr[i, , t] <- crl$values[i, , crl$ref_index[i, t] + 1]
+    drow <- function(i, P) {
+        pa <- which(bitwAnd(P, 2^(seq_len(p) - 1)) > 0); ok <- rowSums(is.na(X[, c(pa, i), drop = FALSE])) == 0
+        q <- if (length(pa)) prod(ns[pa]) else 1; r <- ns[i]; cfg <- rep(1, nrow(X)); m <- 1
+        for (u in pa) { cfg <- cfg + (X[, u] - 1) * m; m <- m * ns[u] }
+        cell <- (cfg - 1) * r + X[, i]; d <- numeric(nrow(X))
+        nij <- tabulate(cfg[ok], q); nijk <- tabulate(cell[ok], q * r)
+        d[ok] <- log(1 / q + nij[cfg[ok]] - 1) - log(1 / (q * r) + nijk[cell[ok]] - 1)
+        d
+    }
+    for (t in 1:2) for (i in seq_len(p)) {
+        dR <- drow(i, refs[i, t])
+        for (P in which(ifm[i, ] == 1L) - 1) {
+            ref <- if (P == refs[i, t]) 0 else min(dR - drow(i, P))
+            expect_equal(cr[i, P + 1, t], ref, tolerance = 1e-12)
+        }
+    }
+})
+
+test_that("coupled sink bound holds for every row, subset and competitor (brute force)", {
+    X <- sm_chain_data[1:80, ]; storage.mode(X) <- "integer"
+    X <- cbind(X, ifelse(runif(80) < 0.8, X[, 3], 3L - X[, 3]))
+    ns <- rep(2L, 4); p <- 4; full <- 2^p - 1; bit <- 2^(0:(p - 1))
+    ifm <- matrix(1L, p, 2^p)
+    for (i in seq_len(p)) ifm[i, bitwAnd(0:full, bit[i]) > 0] <- 0L
+    dv <- function(tab) { A <- matrix(NA_real_, 2^p, p)
+        for (S in 1:full) for (j in which(bitwAnd(S, bit) > 0)) {
+            U <- bitwXor(S, bit[j]); A[S + 1, j] <- tab$F[U + 1] + tab$aflml[j, tab$bps[j, U + 1]] }
+        A }
+    tab <- bnstruct:::sm(X, ns, return.tables = TRUE)
+    pa <- vapply(seq_len(p), function(v) as.integer(sum(bit[tab$dag[, v] == 1L])), integer(1))
+    crl <- .Call("bnstruct_coupling_rows", X, ns, ifm, 1.0, 0L, matrix(pa, p, 1), PACKAGE = "bnstruct")
+    cc <- crl$values[, , 1]
+    st <- tab$aflml; fin <- is.finite(st); st[fin] <- st[fin] - cc[fin]
+    bpt <- .Call("bnstruct_fbp", aflml = st, PACKAGE = "bnstruct")
+    At <- dv(list(F = .Call("bnstruct_fbs_with_scores", bps = bpt, aflml = st, PACKAGE = "bnstruct")$scores,
+                  aflml = st, bps = bpt))
+    for (o in seq_len(nrow(X))) {
+        t2 <- bnstruct:::sm(X[-o, ], ns, return.tables = TRUE)
+        Ao <- dv(t2)
+        for (S in 1:full) {
+            nodes <- which(bitwAnd(S, bit) > 0)
+            if (any(bitwAnd(pa[nodes], bitwNot(S)) > 0)) next
+            scoreG <- sum(tab$aflml[cbind(nodes, pa[nodes] + 1)])
+            scoreG_o <- sum(t2$aflml[cbind(nodes, pa[nodes] + 1)])
+            for (j in nodes) expect_gte(scoreG_o - Ao[S + 1, j] + 1e-7, scoreG - At[S + 1, j])
+        }
+    }
+})
+
+test_that("coupled sink certificate is sound and never weaker than the decoupled one", {
+    for (case in list(list(sm_small_data, sm_small_sizes), list(sm_chain_data, sm_chain_sizes),
+                      list(sm_test_data, sm_test_sizes))) {
+        X <- case[[1]]; ns <- case[[2]]
+        e <- bnstruct:::sm(X, ns, stability = TRUE, stability.mode = "exact")$stability
+        d <- bnstruct:::sm(X, ns, stability = TRUE, stability.mode = "bound")$stability
+        c <- bnstruct:::sm(X, ns, stability = TRUE, stability.mode = "bound", stability.sink = "coupled")$stability
+        expect_identical(c$sink, "coupled")
+        if (isTRUE(c$stable_cpdag)) expect_true(e$stable_cpdag)
+        if (isTRUE(d$stable_cpdag)) expect_true(c$stable_cpdag)
+    }
+    expect_error(
+        bnstruct:::sm(sm_small_data, sm_small_sizes, stability = TRUE, stability.target = "dag",
+                      stability.sink = "coupled"),
+        "only for stability.target = 'cpdag'", fixed = TRUE
+    )
+})
+
+test_that("row-coupled parent margins are sound and never looser than the child-value ones", {
+    for (case in list(list(sm_small_data, sm_small_sizes), list(sm_na_data, sm_small_sizes),
+                      list(sm_chain_data, sm_chain_sizes), list(sm_test_data, sm_test_sizes))) {
+        X <- case[[1]]; ns <- as.integer(case[[2]]); p <- ncol(X)
+        storage.mode(X) <- "integer"
+        ifm <- matrix(1L, p, 2^p)
+        for (i in seq_len(p)) ifm[i, bitwAnd(0:(2^p - 1), 2^(i - 1)) > 0] <- 0L
+        tab <- bnstruct:::sm(X, ns, return.tables = TRUE)
+        b <- .Call("bnstruct_score_loo_bounds", X, ns, ifm, 1.0, 0L, PACKAGE = "bnstruct")
+        cm <- .Call("bnstruct_coupled_parent_margins", tab$aflml, tab$bps, ifm, ns,
+                    b$lower_k, b$upper_k, b$lower, b$upper, PACKAGE = "bnstruct")
+        refs <- t(vapply(seq_len(p), function(i) as.integer(sort(unique(tab$bps[i, ][tab$bps[i, ] > 0] - 1L))[1:4]), integer(4)))
+        refs[is.na(refs)] <- 0L
+        crl <- .Call("bnstruct_coupling_rows", X, ns, ifm, 1.0, 0L, refs, PACKAGE = "bnstruct")
+        pr <- .Call("bnstruct_parent_margins_rows", tab$aflml, tab$bps, ifm, crl$values, refs, crl$ref_index, PACKAGE = "bnstruct")
+        filled <- which(!is.na(pr$margin))
+        expect_true(length(filled) > 0)
+        ok <- filled[!is.na(cm$margin[filled])]
+        expect_true(all(pr$margin[ok] >= cm$margin[ok] - 1e-9))
+        # soundness by brute force on a few removals
+        for (o in c(1, 5, nrow(X))) {
+            t2 <- bnstruct:::sm(X[-o, ], ns, return.tables = TRUE)
+            for (pos in filled) {
+                i <- (pos - 1) %% p + 1; U <- (pos - 1) %/% p; R <- tab$bps[i, U + 1]
+                sub <- which(bitwAnd(0:(2^p - 1), bitwNot(U)) == 0 & ifm[i, ] == 1L & seq_len(2^p) != R)
+                if (!length(sub)) next
+                gap <- t2$aflml[i, R] - max(t2$aflml[i, sub])
+                expect_gte(gap + 1e-7, pr$margin[pos])
+            }
+        }
+    }
+    for (case in list(list(sm_small_data, sm_small_sizes), list(sm_test_data, sm_test_sizes))) {
+        e <- bnstruct:::sm(case[[1]], case[[2]], stability = TRUE, stability.mode = "exact")$stability
+        r <- bnstruct:::sm(case[[1]], case[[2]], stability = TRUE, stability.mode = "bound",
+                           stability.sink = "coupled", stability.parent = "rows")$stability
+        k <- bnstruct:::sm(case[[1]], case[[2]], stability = TRUE, stability.mode = "bound",
+                           stability.sink = "coupled")$stability
+        if (isTRUE(r$stable_cpdag)) expect_true(e$stable_cpdag)
+        if (isTRUE(k$stable_cpdag)) expect_true(r$stable_cpdag)
+    }
+})
+
