@@ -740,7 +740,11 @@ sm_stability_bdeu <- function(
     scope.supplied = FALSE,
     sink = c("decoupled", "coupled"),
     witness.cap = 64L,
-    parent = c("child", "rows")) {
+    parent = c("child", "rows"),
+    bounds = NULL) {
+    # bounds: the per-family removal-delta bounds of bnstruct_score_loo_bounds when the
+    # caller already has them (sm() computes them with the family scores); computed
+    # here otherwise.
     # scoring.func: 0 = BDeu (ess used), 1 = AIC, 2 = BIC (ess ignored). Every
     # certificate below only needs (a) the per-family removal-delta bounds and
     # (b) delta >= 0 and score equivalence, all of which hold for the three
@@ -805,14 +809,16 @@ sm_stability_bdeu <- function(
 
     n.nodes <- ncol(data)
 
-    bounds <- .Call(
-        "bnstruct_score_loo_bounds",
-        data, node.sizes, ifm, ess, scoring.func,
-        PACKAGE = "bnstruct"
-    )
-
-    lower_delta <- bounds$lower
-    upper_delta <- bounds$upper
+    get_bounds <- function() {
+        if (is.null(bounds)) {
+            bounds <- .Call(
+                "bnstruct_score_loo_bounds",
+                data, node.sizes, ifm, ess, scoring.func,
+                PACKAGE = "bnstruct"
+            )
+        }
+        bounds
+    }
 
     # CPDAG (Markov equivalence class) certificate. Certifies invariance of the
     # skeleton and v-structures rather than the (unidentifiable) oriented DAG.
@@ -831,6 +837,10 @@ sm_stability_bdeu <- function(
             cert$scope <- "all_observations"
             return(cert)
         }
+
+        bounds <- get_bounds()
+        lower_delta <- bounds$lower
+        upper_delta <- bounds$upper
 
         g_bounds <- .Call(
             "bnstruct_compute_lg_ug_tight",
@@ -857,6 +867,10 @@ sm_stability_bdeu <- function(
         cert$scope <- "optimal_visited"
         return(cert)
     }
+
+    bounds <- get_bounds()
+    lower_delta <- bounds$lower
+    upper_delta <- bounds$upper
 
     is_asym <- bound.type %in% c("asym_cons", "asym_tight")
     is_tight <- bound.type %in% c("tight", "asym_tight")

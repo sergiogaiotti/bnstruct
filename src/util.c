@@ -121,8 +121,8 @@ SEXP bnstruct_is_acyclic( SEXP graph )
 double bdeu_score( unsigned int * d, unsigned int n_nodes, unsigned int n_cases, unsigned int * ns, 
 	unsigned int ni, unsigned int * pa, unsigned int n_pa, double alpha )
 {
-	int i, j, index, elmt, stride;
-	double acc, ll;
+	int i, j, index, elmt;
+	double ll;
 	
 	// utility vectors
 	int cum_prod_sizes[n_pa+2]; 
@@ -139,9 +139,6 @@ double bdeu_score( unsigned int * d, unsigned int n_nodes, unsigned int n_cases,
 	// utility variables
 	int prod_sizes = cum_prod_sizes[n_pa+1];
 	int prod_sizes_pa = prod_sizes / ns[ni];
-	// int n_na = 0;
-	double prior = alpha / prod_sizes;
-	double alpha_ij = alpha / prod_sizes_pa;
 	
 	// vector holding counts (LARGE)
 	double * counts = calloc( prod_sizes, sizeof(double) ); 
@@ -155,10 +152,7 @@ double bdeu_score( unsigned int * d, unsigned int n_nodes, unsigned int n_cases,
 		{
 			elmt = d[ i + strides[j] ];
 			if( elmt == NA_INTEGER )
-			//{
-			//	n_na++;
 				break;
-			//}
 			index += (elmt - 1) * cum_prod_sizes[j];
 		}
 		// check if NA encountered
@@ -168,26 +162,41 @@ double bdeu_score( unsigned int * d, unsigned int n_nodes, unsigned int n_cases,
 		counts[index] += 1;			
 	}
 	
-	// correct for NAs
-	//for( i = 0; i < prod_sizes; i++ )
-	//	counts[i] += n_na * (counts[i] + prior) / ( n_cases - n_na + alpha );
-		
+	ll = bdeu_score_counts( counts, prod_sizes, prod_sizes_pa, ns[ni], alpha );
+  
+  free( counts );
+	
+	return ll;
+}
+
+/* BDeu family score from its contingency table counts[pc * r_i + k] (cells laid
+ * out by parent configuration, then child value). Shared by bdeu_score and the
+ * pattern-based family passes of smfast.c, so both give bit-identical scores. */
+double bdeu_score_counts( const double * counts, int prod_sizes, int prod_sizes_pa, int r_i, double alpha )
+{
+	int i, j, stride;
+	double acc, ll;
+	double prior = alpha / prod_sizes;
+	double alpha_ij = alpha / prod_sizes_pa;
+	// empty cells and parent configurations contribute lgamma(prior + 0) = lgamma(prior)
+	// (x + 0.0 == x exactly), so the value is computed once; the sums keep their order,
+	// hence the result is bit-identical to calling lgamma for every cell
+	double lg_prior = lgamma(prior), lg_alpha_ij = lgamma(alpha_ij);
+	
 	// compute log likelihood
-	ll = prod_sizes_pa*lgamma(alpha_ij) - prod_sizes*lgamma(prior);
+	ll = prod_sizes_pa*lg_alpha_ij - prod_sizes*lg_prior;
 	for( i = 0; i < prod_sizes; i++ )
-		ll += lgamma(prior + counts[i]);
+		ll += (counts[i] == 0.0) ? lg_prior : lgamma(prior + counts[i]);
 	
 	// accumulate parent counts, by summing over ni
 	for( i = 0; i < prod_sizes_pa; i++ )
 	{
-		stride = i * ns[ni];
+		stride = i * r_i;
 		acc = counts[stride];
-		for( j = 1; j < ns[ni]; j++ )
+		for( j = 1; j < r_i; j++ )
 			acc += counts[stride + j];
-		ll -= lgamma(alpha_ij + acc);
+		ll -= (acc == 0.0) ? lg_alpha_ij : lgamma(alpha_ij + acc);
 	}
-  
-  free( counts );
 	
 	return ll;
 }
@@ -287,8 +296,8 @@ SEXP bnstruct_compute_counts( SEXP data, SEXP node_sizes )
 double log_likelihood ( unsigned int * d, unsigned int n_nodes, unsigned int n_cases, unsigned int * ns,
   unsigned int ni, unsigned int * pa, unsigned int n_pa, int func )
 {
-	int i, j, index, elmt, stride;
-	double acc, logl;
+	int i, j, index, elmt;
+	double logl;
 	
 	// utility vectors
 	int cum_prod_sizes[n_pa+2]; 
@@ -332,10 +341,22 @@ double log_likelihood ( unsigned int * d, unsigned int n_nodes, unsigned int n_c
 		counts[index] += 1;			
 	}
 	
-	// correct for NAs
-	//for( i = 0; i < prod_sizes; i++ )
-	//	counts[i] += n_na * (counts[i] + prior) / ( n_cases - n_na + alpha );
-		
+  logl = log_likelihood_counts( counts, prod_sizes_pa, ns[ni], func );
+
+  free( counts );
+
+	return logl;
+}
+
+/* Penalized log likelihood of a family from its contingency table (layout as in
+ * bdeu_score_counts); shared by log_likelihood and the pattern-based family
+ * passes of smfast.c. */
+double log_likelihood_counts( const double * counts, int prod_sizes_pa, unsigned int r_i, int func )
+{
+	int i, stride;
+	unsigned int j;
+	double acc, logl;
+
 	// compute log likelihood: sum_{j,k} n_ijk * log( n_ijk / n_ij ),
 	// with the 0 * log 0 = 0 convention. n_complete counts the rows that are
 	// complete for this family; it is the sample size the BIC penalty refers to,
@@ -346,10 +367,10 @@ double log_likelihood ( unsigned int * d, unsigned int n_nodes, unsigned int n_c
 
 	for( i = 0; i < prod_sizes_pa; i++ )
 	{
-		stride = i * ns[ni];
+		stride = i * r_i;
 		acc    = 0.0;
 
-		for( j = 0; j < ns[ni]; j++ )
+		for( j = 0; j < r_i; j++ )
     {
 			acc  += counts[stride + j];
     }
@@ -360,7 +381,7 @@ double log_likelihood ( unsigned int * d, unsigned int n_nodes, unsigned int n_c
     n_complete += acc;
     acc = log(acc);
 
-    for ( j = 0 ; j < ns[ni] ; j++ )
+    for ( j = 0 ; j < r_i ; j++ )
     {
       if( counts[stride + j] >= 1.0 )
         logl += counts[stride + j] * (log(counts[stride + j]) - acc);
@@ -372,12 +393,10 @@ double log_likelihood ( unsigned int * d, unsigned int n_nodes, unsigned int n_c
   if( func == 2 )
   {
     if( n_complete >= 1.0 )
-      logl -= 0.5 * log(n_complete) * prod_sizes_pa * (ns[ni] - 1);
+      logl -= 0.5 * log(n_complete) * prod_sizes_pa * (r_i - 1);
   }
   else
-    logl -= (double)prod_sizes_pa * (ns[ni] - 1);
-
-  free( counts );
+    logl -= (double)prod_sizes_pa * (r_i - 1);
 
 	return logl;
 }

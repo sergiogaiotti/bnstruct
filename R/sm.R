@@ -133,7 +133,16 @@ sm <- function(x, node.sizes, scoring.func = 0, cont.nodes = NULL, max.fanin = N
     }
 
     # aflml <- all.families.log.marginal.likelihood( data, node.sizes, ifm, ess )
-    aflml <- .Call("bnstruct_all_fam_log_marg_lik", data, node.sizes, ifm, ess, scoring.func, PACKAGE = "bnstruct")
+    # A bound certificate also needs the per-family removal-delta bounds; they come from
+    # the same counting pass as the family scores (exact leave-one-out does not use them).
+    loo.bounds <- NULL
+    if (stability && stability.mode == "bound") {
+        fam <- .Call("bnstruct_all_fam_scores_bounds", data, node.sizes, ifm, ess, scoring.func, PACKAGE = "bnstruct")
+        aflml <- fam$aflml
+        loo.bounds <- fam[c("lower", "upper", "lower_k", "upper_k")]
+    } else {
+        aflml <- .Call("bnstruct_all_fam_log_marg_lik", data, node.sizes, ifm, ess, scoring.func, PACKAGE = "bnstruct")
+    }
 
     # bps <- find.best.parents( aflml )
     bps <- .Call("bnstruct_fbp", aflml = aflml, PACKAGE = "bnstruct")
@@ -178,7 +187,8 @@ sm <- function(x, node.sizes, scoring.func = 0, cont.nodes = NULL, max.fanin = N
             scope.supplied = !scope.default,
             sink = stability.sink,
             witness.cap = as.integer(stability.witnesses),
-            parent = stability.parent
+            parent = stability.parent,
+            bounds = loo.bounds
         )
 
         return(list(

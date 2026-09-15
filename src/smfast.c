@@ -207,6 +207,159 @@ static int loo_rows_equal(const unsigned int *d, unsigned int n_ex, unsigned int
 	return 1;
 }
 
+/* ------------------------------------------------------------------------------------
+ * Family counting over distinct row patterns, shared by every routine that counts all
+ * families: the learner's family scores, the removal-delta bounds, exact leave-one-out
+ * and the per-row coupling tables. Outputs are identical to counting row by row.
+ *
+ * (a) Rows enter a family's counts only through their values. The N rows are sorted
+ *     once and replaced by their K distinct patterns with multiplicities (missing
+ *     values included); counts are sums of integers, hence identical.
+ * (b) The parent-configuration index of a pattern in parent set P,
+ *         pc(P) = sum_k (x_{pa[k]} - 1) prod_{l<k} r_{pa[l]}   (parents increasing),
+ *     satisfies pc(P u {e}) = pc(P) + (x_e - 1) prod_{l in P} r_l when e > max(P).
+ *     A depth-first walk over parent sets that adds elements in increasing order
+ *     computes it in O(1) per (pattern, set), keeping one index array per depth
+ *     (memory (p + 1) K). Counting one family then costs O(K) instead of O(N |P|).
+ *     The cell of a pattern in family (i, P) is pc(P) * r_i + (x_i - 1), the layout
+ *     of bdeu_score; pc = -1 marks a pattern with a missing parent value.
+ * ------------------------------------------------------------------------------------ */
+typedef struct
+{
+	unsigned int n;		 /* number of distinct patterns K */
+	unsigned int *ord;	 /* row indices in lexicographic order (length N) */
+	unsigned int *start; /* rows of pattern u: ord[start[u]] .. ord[start[u + 1] - 1] */
+	double *w;			 /* multiplicity of pattern u */
+	int *x;				 /* K x p values of the patterns, column-major, NA_INTEGER kept */
+} row_patterns;
+
+static void build_row_patterns(const unsigned int *d, unsigned int n_ex, unsigned int n_nodes, row_patterns *rp)
+{
+	unsigned int g, h, u, j, K = 0;
+	rp->ord = (unsigned int *)R_alloc(n_ex > 0 ? n_ex : 1, sizeof(unsigned int));
+	for (g = 0; g < n_ex; g++)
+		rp->ord[g] = g;
+	if (n_ex > 1)
+		loo_sort_rows(d, n_ex, n_nodes, rp->ord);
+	for (g = 0; g < n_ex; g = h, K++)
+		for (h = g + 1; h < n_ex && loo_rows_equal(d, n_ex, n_nodes, rp->ord[g], rp->ord[h]); h++)
+			;
+	rp->n = K;
+	rp->start = (unsigned int *)R_alloc(K + 1, sizeof(unsigned int));
+	rp->w = (double *)R_alloc(K > 0 ? K : 1, sizeof(double));
+	rp->x = (int *)R_alloc((R_xlen_t)(K > 0 ? K : 1) * n_nodes, sizeof(int));
+	for (g = 0, u = 0; g < n_ex; g = h, u++)
+	{
+		for (h = g + 1; h < n_ex && loo_rows_equal(d, n_ex, n_nodes, rp->ord[g], rp->ord[h]); h++)
+			;
+		rp->start[u] = g;
+		rp->w[u] = (double)(h - g);
+		for (j = 0; j < n_nodes; j++)
+			rp->x[u + (R_xlen_t)j * K] = (int)d[rp->ord[g] + (R_xlen_t)j * n_ex];
+	}
+	rp->start[K] = n_ex;
+}
+
+typedef struct
+{
+	unsigned int p, K, maxsize, depth;
+	int started;
+	const int *x, *ns;
+	unsigned int *set;	/* parent set at each depth */
+	unsigned int *next; /* next element to try below each depth */
+	R_xlen_t *q;		/* number of parent configurations at each depth */
+	R_xlen_t *pc;		/* (p + 1) x K parent-configuration indices */
+} subset_walk;
+
+static void walk_init(subset_walk *w, const row_patterns *rp, unsigned int p, const int *ns, unsigned int maxsize)
+{
+	R_xlen_t u, K = rp->n;
+	w->p = p;
+	w->K = rp->n;
+	w->maxsize = maxsize;
+	w->depth = 0;
+	w->started = 0;
+	w->x = rp->x;
+	w->ns = ns;
+	w->set = (unsigned int *)R_alloc(p + 1, sizeof(unsigned int));
+	w->next = (unsigned int *)R_alloc(p + 1, sizeof(unsigned int));
+	w->q = (R_xlen_t *)R_alloc(p + 1, sizeof(R_xlen_t));
+	w->pc = (R_xlen_t *)R_alloc((R_xlen_t)(p + 1) * (K > 0 ? K : 1), sizeof(R_xlen_t));
+	w->set[0] = 0;
+	w->next[0] = 0;
+	w->q[0] = 1;
+	for (u = 0; u < K; u++)
+		w->pc[u] = 0;
+}
+
+/* Move to the next parent set in pre-order (the empty set first); 0 when every set
+ * of at most maxsize elements has been visited. */
+static int walk_next(subset_walk *w)
+{
+	if (!w->started)
+	{
+		w->started = 1;
+		return 1;
+	}
+	for (;;)
+	{
+		unsigned int dd = w->depth;
+		if (dd < w->maxsize && w->next[dd] < w->p)
+		{
+			unsigned int e = w->next[dd]++;
+			R_xlen_t u, K = w->K, qd = w->q[dd];
+			const R_xlen_t *src = w->pc + (R_xlen_t)dd * K;
+			R_xlen_t *dst = w->pc + (R_xlen_t)(dd + 1) * K;
+			const int *xe = w->x + (R_xlen_t)e * K;
+			for (u = 0; u < K; u++)
+				dst[u] = (src[u] < 0 || xe[u] == NA_INTEGER) ? -1 : src[u] + (R_xlen_t)(xe[u] - 1) * qd;
+			w->set[dd + 1] = w->set[dd] | (1U << e);
+			w->q[dd + 1] = qd * w->ns[e];
+			w->next[dd + 1] = e + 1;
+			w->depth = dd + 1;
+			return 1;
+		}
+		if (dd == 0)
+			return 0;
+		w->depth = dd - 1;
+	}
+}
+
+#define WALK_SET(w) ((w)->set[(w)->depth])
+#define WALK_Q(w) ((w)->q[(w)->depth])
+#define WALK_PC(w) ((w)->pc + (R_xlen_t)(w)->depth * (w)->K)
+
+/* Largest admissible parent set, and the largest admissible count table (cells). */
+static void admissible_extent(const int *ifm, const int *ns, unsigned int n_nodes, unsigned int pow_nodes,
+							  unsigned int *maxsize, R_xlen_t *maxcells, R_xlen_t *maxq)
+{
+	unsigned int s, i, k;
+	*maxsize = 0;
+	*maxcells = 1;
+	*maxq = 1;
+	for (s = 0; s < pow_nodes; s++)
+	{
+		unsigned int size = 0;
+		R_xlen_t q = 1;
+		for (k = 0; k < n_nodes; k++)
+			if (s & (1U << k))
+			{
+				size++;
+				q *= ns[k];
+			}
+		for (i = 0; i < n_nodes; i++)
+			if (ifm[(R_xlen_t)s * n_nodes + i])
+			{
+				if (size > *maxsize)
+					*maxsize = size;
+				if (q * ns[i] > *maxcells)
+					*maxcells = q * ns[i];
+				if (q > *maxq)
+					*maxq = q;
+			}
+	}
+}
+
 /* f(x) = x log x - (x-1) log(x-1), the per-cell term of the BIC/AIC removal
  * delta (0 log 0 = 0, so f(1) = 0). The log-likelihood part of removing one
  * row from cell (j,k) is f(n_ij) - f(n_ijk). */
@@ -218,247 +371,244 @@ static double loo_f_cell(double x)
 	return v;
 }
 
-/* Per-family min/max (and per-child-value min/max) of the one-row removal
- * delta, for the scoring function selected by func: 0 = BDeu, 1 = AIC,
- * 2 = BIC. The BIC penalty uses the family's complete-case row count, matching
- * log_likelihood(); its N -> N-1 relief term is row-independent within the
- * family, and is zero for AIC (no N in the penalty) and for BDeu. */
-SEXP bnstruct_score_loo_bounds(SEXP data, SEXP node_sizes, SEXP imp_fam_mask, SEXP ess, SEXP func)
+/* One pass over all admissible families on the distinct row patterns, computing any of:
+ *   - the family scores (score_func 0 = BDeu, 1 = AIC, 2 = BIC), bit-identical to
+ *     bdeu_score / log_likelihood (same count tables, same scoring code);
+ *   - the per-family min/max of the one-row removal delta and its per-child-value
+ *     min/max (lower, upper, lower_k, upper_k).
+ * The BIC penalty uses the family's complete-case row count, matching log_likelihood();
+ * its N -> N-1 relief term is row-independent within the family, and is zero for AIC
+ * (no N in the penalty) and for BDeu. Removing a row that is incomplete in the family
+ * shifts its score by 0, so 0 enters the bounds whenever such rows exist.
+ * Returns list(aflml, lower, upper, lower_k, upper_k) with NULL for components not
+ * requested. Cost O(N p log N) to find the patterns, O(K) per family for counting and
+ * bounds, plus O(cells) per family for the scores (the score sums over all cells). */
+static SEXP family_scores_bounds(SEXP data, SEXP node_sizes, SEXP imp_fam_mask, double alpha,
+								 int scoring_func, int want_scores, int want_bounds)
 {
-	unsigned int i, j, n_pa, pos;
-	int scoring_func = *INTEGER(func);
-
-	// get inputs
-	unsigned int *d = (unsigned int *)INTEGER(data);
-	unsigned int n_nodes = ncols(data);
-	unsigned int n_ex = nrows(data);
-	unsigned int *ns = (unsigned int *)INTEGER(node_sizes);
-	unsigned int *ifm = (unsigned int *)INTEGER(imp_fam_mask);
+	const unsigned int *d = (const unsigned int *)INTEGER(data);
+	unsigned int n_nodes = ncols(data), n_ex = nrows(data);
+	const int *ns = INTEGER(node_sizes), *ifm = INTEGER(imp_fam_mask);
 	unsigned int pow_nodes = ncols(imp_fam_mask);
-	double alpha = *(REAL(ess));
-	unsigned int *pa = (unsigned int *)R_alloc(n_nodes, sizeof(unsigned int));
-
-	// maximum number of states over all nodes (for the per-child-value arrays)
-	unsigned int max_r = 1;
+	unsigned int i, k, max_r = 1, maxsize;
+	R_xlen_t t, u, maxcells, maxq, npk = (R_xlen_t)n_nodes * pow_nodes;
 	for (i = 0; i < n_nodes; i++)
-		if (ns[i] > max_r)
+		if ((unsigned int)ns[i] > max_r)
 			max_r = ns[i];
 
-	// allocate outputs.
-	// lower/upper: global min/max of the local delta per (node, parent set).
-	// lower_k/upper_k: min/max of the local delta restricted to each child
-	// value k, as 3D arrays [n_nodes, pow_nodes, max_r]. These enable the
-	// coupled (same-child-value) leave-one-out margin.
-	SEXP res, lower_sexp, upper_sexp, lower_k_sexp, upper_k_sexp, names, dim_k;
-	PROTECT(res = allocVector(VECSXP, 4));
-	PROTECT(lower_sexp = allocMatrix(REALSXP, n_nodes, pow_nodes));
-	PROTECT(upper_sexp = allocMatrix(REALSXP, n_nodes, pow_nodes));
-	PROTECT(lower_k_sexp = allocVector(REALSXP, (R_xlen_t)n_nodes * pow_nodes * max_r));
-	PROTECT(upper_k_sexp = allocVector(REALSXP, (R_xlen_t)n_nodes * pow_nodes * max_r));
-	PROTECT(dim_k = allocVector(INTSXP, 3));
-	INTEGER(dim_k)[0] = n_nodes;
-	INTEGER(dim_k)[1] = pow_nodes;
-	INTEGER(dim_k)[2] = max_r;
-	setAttrib(lower_k_sexp, R_DimSymbol, dim_k);
-	setAttrib(upper_k_sexp, R_DimSymbol, duplicate(dim_k));
-	PROTECT(names = allocVector(STRSXP, 4));
-
-	SET_STRING_ELT(names, 0, mkChar("lower"));
-	SET_STRING_ELT(names, 1, mkChar("upper"));
-	SET_STRING_ELT(names, 2, mkChar("lower_k"));
-	SET_STRING_ELT(names, 3, mkChar("upper_k"));
+	SEXP res, names, aflml_s = R_NilValue, lower_s = R_NilValue, upper_s = R_NilValue;
+	SEXP lower_k_s = R_NilValue, upper_k_s = R_NilValue, dim_k;
+	int nprot = 2;
+	PROTECT(res = allocVector(VECSXP, 5));
+	PROTECT(names = allocVector(STRSXP, 5));
+	SET_STRING_ELT(names, 0, mkChar("aflml"));
+	SET_STRING_ELT(names, 1, mkChar("lower"));
+	SET_STRING_ELT(names, 2, mkChar("upper"));
+	SET_STRING_ELT(names, 3, mkChar("lower_k"));
+	SET_STRING_ELT(names, 4, mkChar("upper_k"));
 	setAttrib(res, R_NamesSymbol, names);
-
-	double *lower = REAL(lower_sexp);
-	double *upper = REAL(upper_sexp);
-	double *lower_k = REAL(lower_k_sexp);
-	double *upper_k = REAL(upper_k_sexp);
-	for (i = 0; i < n_nodes * pow_nodes; i++)
+	double *aflml = NULL, *lower = NULL, *upper = NULL, *lower_k = NULL, *upper_k = NULL;
+	if (want_scores)
 	{
-		lower[i] = 0.0;
-		upper[i] = 0.0;
+		PROTECT(aflml_s = allocMatrix(REALSXP, n_nodes, pow_nodes));
+		nprot++;
+		aflml = REAL(aflml_s);
+		for (t = 0; t < npk; t++)
+			aflml[t] = R_NegInf;
+		SET_VECTOR_ELT(res, 0, aflml_s);
 	}
+	if (want_bounds)
 	{
-		R_xlen_t t;
-		R_xlen_t nk = (R_xlen_t)n_nodes * pow_nodes * max_r;
-		for (t = 0; t < nk; t++)
+		PROTECT(lower_s = allocMatrix(REALSXP, n_nodes, pow_nodes));
+		PROTECT(upper_s = allocMatrix(REALSXP, n_nodes, pow_nodes));
+		PROTECT(lower_k_s = allocVector(REALSXP, npk * max_r));
+		PROTECT(upper_k_s = allocVector(REALSXP, npk * max_r));
+		PROTECT(dim_k = allocVector(INTSXP, 3));
+		nprot += 5;
+		INTEGER(dim_k)[0] = n_nodes;
+		INTEGER(dim_k)[1] = pow_nodes;
+		INTEGER(dim_k)[2] = max_r;
+		setAttrib(lower_k_s, R_DimSymbol, dim_k);
+		setAttrib(upper_k_s, R_DimSymbol, duplicate(dim_k));
+		lower = REAL(lower_s);
+		upper = REAL(upper_s);
+		lower_k = REAL(lower_k_s);
+		upper_k = REAL(upper_k_s);
+		for (t = 0; t < npk; t++)
+		{
+			lower[t] = 0.0;
+			upper[t] = 0.0;
+		}
+		for (t = 0; t < npk * max_r; t++)
 		{
 			lower_k[t] = R_PosInf;
 			upper_k[t] = R_NegInf;
 		}
+		SET_VECTOR_ELT(res, 1, lower_s);
+		SET_VECTOR_ELT(res, 2, upper_s);
+		SET_VECTOR_ELT(res, 3, lower_k_s);
+		SET_VECTOR_ELT(res, 4, upper_k_s);
 	}
 
-	for (i = 0; i < n_nodes; i++)
-		for (j = 0; j < pow_nodes; j++)
+	admissible_extent(ifm, ns, n_nodes, pow_nodes, &maxsize, &maxcells, &maxq);
+	row_patterns rp;
+	build_row_patterns(d, n_ex, n_nodes, &rp);
+	R_xlen_t K = rp.n;
+	/* count tables stay all-zero between families: only touched cells are reset */
+	double *counts = (double *)R_alloc(maxcells, sizeof(double));
+	double *nij = (double *)R_alloc(maxq, sizeof(double));
+	for (t = 0; t < maxcells; t++)
+		counts[t] = 0.0;
+	for (t = 0; t < maxq; t++)
+		nij[t] = 0.0;
+	R_xlen_t *touched = (R_xlen_t *)R_alloc(K > 0 ? K : 1, sizeof(R_xlen_t)), nt;
+	double *low_k_local = (double *)R_alloc(max_r, sizeof(double));
+	double *up_k_local = (double *)R_alloc(max_r, sizeof(double));
+	double *n_k_incomplete = (double *)R_alloc(max_r, sizeof(double));
+
+	subset_walk w;
+	walk_init(&w, &rp, n_nodes, ns, maxsize);
+	while (walk_next(&w))
+	{
+		unsigned int P = WALK_SET(&w);
+		R_xlen_t q = WALK_Q(&w);
+		const R_xlen_t *pc = WALK_PC(&w);
+		for (i = 0; i < n_nodes; i++)
 		{
-			pos = j * n_nodes + i;
+			R_xlen_t pos = (R_xlen_t)P * n_nodes + i;
 			if (!ifm[pos])
 				continue;
-
-			n_pa = get_bits(j, pa, n_nodes);
-
-			int cum_prod_sizes[n_pa + 2];
-			int strides[n_pa + 1];
-			int prod_sizes_pa = 1;
-			int prod_sizes;
-			int k;
-			int pc;
-			unsigned int ex;
-
-			cum_prod_sizes[0] = 1;
-			cum_prod_sizes[1] = ns[i];
-			for (k = 0; k < (int)n_pa; k++)
-			{
-				cum_prod_sizes[k + 2] = cum_prod_sizes[k + 1] * ns[pa[k]];
-				prod_sizes_pa *= ns[pa[k]];
-			}
-
-			prod_sizes = prod_sizes_pa * ns[i];
-			strides[0] = i * n_ex;
-			for (k = 0; k < (int)n_pa; k++)
-				strides[k + 1] = pa[k] * n_ex;
-
-			double *counts = (double *)calloc(prod_sizes, sizeof(double));
-			if (counts == NULL)
-				error("memory allocation failed in bnstruct_score_loo_bounds");
-
-			unsigned int r_i = ns[i];
-			double alpha_ij = alpha / (double)prod_sizes_pa;
-			double alpha_ijk = alpha / (double)prod_sizes;
-			double min_delta = R_PosInf;
-			double max_delta = R_NegInf;
-			int seen = 0;
-
-			double low_k_local[r_i];
-			double up_k_local[r_i];
-			for (k = 0; k < (int)r_i; k++)
-			{
-				low_k_local[k] = R_PosInf;
-				up_k_local[k] = R_NegInf;
-			}
-
-			// n_k_incomplete[k]: rows with child value k that are incomplete for
-			// this family (NA in some parent). Removing such a row leaves the
-			// family score unchanged (delta 0), so 0 must be included in the
-			// per-k (and global) delta bounds whenever such rows exist.
-			double n_k_incomplete[r_i];
-			int n_child_na = 0;
-			for (k = 0; k < (int)r_i; k++)
+			int r_i = ns[i];
+			const int *xi = rp.x + (R_xlen_t)i * K;
+			double n_child_na = 0.0, n_fam = 0.0;
+			for (k = 0; k < (unsigned int)r_i; k++)
 				n_k_incomplete[k] = 0.0;
-
-			for (ex = 0; ex < n_ex; ex++)
+			nt = 0;
+			for (u = 0; u < K; u++)
 			{
-				int index = 0;
-				int elmt;
-				unsigned int jj;
-				for (jj = 0; jj < n_pa + 1; jj++)
+				if (xi[u] == NA_INTEGER)
 				{
-					elmt = d[ex + strides[jj]];
-					if (elmt == NA_INTEGER)
-						break;
-					index += (elmt - 1) * cum_prod_sizes[jj];
-				}
-				if (jj < n_pa + 1)
-				{
-					int child = d[ex + strides[0]];
-					if (child == NA_INTEGER)
-						n_child_na++;
-					else
-						n_k_incomplete[child - 1] += 1.0;
+					n_child_na += rp.w[u];
 					continue;
 				}
-
-				counts[index] += 1;
+				if (pc[u] < 0)
+				{
+					n_k_incomplete[xi[u] - 1] += rp.w[u];
+					continue;
+				}
+				R_xlen_t cell = pc[u] * r_i + (xi[u] - 1);
+				if (counts[cell] == 0.0)
+					touched[nt++] = cell;
+				counts[cell] += rp.w[u];
+				nij[pc[u]] += rp.w[u];
+				n_fam += rp.w[u];
 			}
 
-			// family complete-case count and the BIC penalty-relief term,
-			// constant over the family's admissible removals
-			double n_fam = 0.0;
-			for (k = 0; k < prod_sizes; k++)
-				n_fam += counts[k];
-			double pen_relief = 0.0;
-			if (scoring_func == 2 && n_fam >= 2.0)
-				pen_relief = 0.5 * (double)prod_sizes_pa * (double)(r_i - 1) *
-							 log(n_fam / (n_fam - 1.0));
+			if (want_scores)
+				aflml[pos] = (scoring_func == 0)
+								 ? bdeu_score_counts(counts, (int)(q * r_i), (int)q, r_i, alpha)
+								 : log_likelihood_counts(counts, (int)q, (unsigned int)r_i, scoring_func);
 
-			for (pc = 0; pc < prod_sizes_pa; pc++)
+			if (want_bounds)
 			{
-				int base = pc * r_i;
-				double n_ij = 0.0;
-				for (k = 0; k < (int)r_i; k++)
-					n_ij += counts[base + k];
-				if (n_ij < 1.0)
-					continue;
-				for (k = 0; k < (int)r_i; k++)
+				double alpha_ij = alpha / (double)q;
+				double alpha_ijk = alpha / (double)(q * r_i);
+				double min_delta = R_PosInf, max_delta = R_NegInf;
+				int seen = 0;
+				for (k = 0; k < (unsigned int)r_i; k++)
 				{
-					double n_ijk = counts[base + k];
-					if (n_ijk < 1.0)
-						continue;
-					double delta;
-					if (scoring_func == 0)
-						delta = log(alpha_ij + n_ij - 1.0) - log(alpha_ijk + n_ijk - 1.0);
-					else
-						delta = loo_f_cell(n_ij) - loo_f_cell(n_ijk) + pen_relief;
+					low_k_local[k] = R_PosInf;
+					up_k_local[k] = R_NegInf;
+				}
+				double pen_relief = 0.0;
+				if (scoring_func == 2 && n_fam >= 2.0)
+					pen_relief = 0.5 * (double)q * (double)(r_i - 1) * log(n_fam / (n_fam - 1.0));
+				/* one delta per occupied cell (min/max do not depend on the order) */
+				for (t = 0; t < nt; t++)
+				{
+					int kk = (int)(touched[t] % r_i);
+					double n_ij = nij[touched[t] / r_i], n_ijk = counts[touched[t]];
+					double delta = (scoring_func == 0)
+									   ? log(alpha_ij + n_ij - 1.0) - log(alpha_ijk + n_ijk - 1.0)
+									   : loo_f_cell(n_ij) - loo_f_cell(n_ijk) + pen_relief;
 					if (delta < min_delta)
 						min_delta = delta;
 					if (delta > max_delta)
 						max_delta = delta;
-					if (delta < low_k_local[k])
-						low_k_local[k] = delta;
-					if (delta > up_k_local[k])
-						up_k_local[k] = delta;
+					if (delta < low_k_local[kk])
+						low_k_local[kk] = delta;
+					if (delta > up_k_local[kk])
+						up_k_local[kk] = delta;
 					seen = 1;
 				}
-			}
-
-			if (!seen)
-			{
-				min_delta = 0.0;
-				max_delta = 0.0;
-			}
-
-			// removals of rows incomplete for this family shift its score by 0
-			if (n_child_na > 0)
-			{
-				if (min_delta > 0.0)
-					min_delta = 0.0;
-				if (max_delta < 0.0)
-					max_delta = 0.0;
-			}
-			for (k = 0; k < (int)r_i; k++)
-				if (n_k_incomplete[k] > 0.0)
+				if (!seen)
 				{
-					if (low_k_local[k] > 0.0)
-						low_k_local[k] = 0.0;
-					if (up_k_local[k] < 0.0)
-						up_k_local[k] = 0.0;
+					min_delta = 0.0;
+					max_delta = 0.0;
+				}
+				if (n_child_na > 0.0)
+				{
 					if (min_delta > 0.0)
 						min_delta = 0.0;
 					if (max_delta < 0.0)
 						max_delta = 0.0;
 				}
-
-			lower[pos] = min_delta;
-			upper[pos] = max_delta;
-
-			for (k = 0; k < (int)r_i; k++)
-			{
-				R_xlen_t idx_k = (R_xlen_t)i + (R_xlen_t)n_nodes * j +
-								 (R_xlen_t)n_nodes * pow_nodes * k;
-				lower_k[idx_k] = low_k_local[k];
-				upper_k[idx_k] = up_k_local[k];
+				for (k = 0; k < (unsigned int)r_i; k++)
+					if (n_k_incomplete[k] > 0.0)
+					{
+						if (low_k_local[k] > 0.0)
+							low_k_local[k] = 0.0;
+						if (up_k_local[k] < 0.0)
+							up_k_local[k] = 0.0;
+						if (min_delta > 0.0)
+							min_delta = 0.0;
+						if (max_delta < 0.0)
+							max_delta = 0.0;
+					}
+				lower[pos] = min_delta;
+				upper[pos] = max_delta;
+				for (k = 0; k < (unsigned int)r_i; k++)
+				{
+					lower_k[pos + npk * k] = low_k_local[k];
+					upper_k[pos + npk * k] = up_k_local[k];
+				}
 			}
 
-			free(counts);
+			for (t = 0; t < nt; t++)
+			{
+				counts[touched[t]] = 0.0;
+				nij[touched[t] / r_i] = 0.0;
+			}
 		}
-
-	SET_VECTOR_ELT(res, 0, lower_sexp);
-	SET_VECTOR_ELT(res, 1, upper_sexp);
-	SET_VECTOR_ELT(res, 2, lower_k_sexp);
-	SET_VECTOR_ELT(res, 3, upper_k_sexp);
-
-	UNPROTECT(7);
+	}
+	UNPROTECT(nprot);
 	return res;
+}
+
+/* Per-family min/max (and per-child-value min/max) of the one-row removal delta, for
+ * the scoring function selected by func: 0 = BDeu, 1 = AIC, 2 = BIC. */
+SEXP bnstruct_score_loo_bounds(SEXP data, SEXP node_sizes, SEXP imp_fam_mask, SEXP ess, SEXP func)
+{
+	SEXP all, res, names;
+	PROTECT(all = family_scores_bounds(data, node_sizes, imp_fam_mask, *REAL(ess), *INTEGER(func), 0, 1));
+	PROTECT(res = allocVector(VECSXP, 4));
+	PROTECT(names = allocVector(STRSXP, 4));
+	int k;
+	for (k = 0; k < 4; k++)
+	{
+		SET_VECTOR_ELT(res, k, VECTOR_ELT(all, k + 1));
+		SET_STRING_ELT(names, k, STRING_ELT(getAttrib(all, R_NamesSymbol), k + 1));
+	}
+	setAttrib(res, R_NamesSymbol, names);
+	UNPROTECT(3);
+	return res;
+}
+
+/* Family scores and removal-delta bounds from one counting pass:
+ * list(aflml, lower, upper, lower_k, upper_k). */
+SEXP bnstruct_all_fam_scores_bounds(SEXP data, SEXP node_sizes, SEXP imp_fam_mask, SEXP ess, SEXP func)
+{
+	return family_scores_bounds(data, node_sizes, imp_fam_mask, *REAL(ess), *INTEGER(func), 1, 1);
 }
 
 /* backward-compatible BDeu entry point */
@@ -476,9 +626,16 @@ SEXP bnstruct_bdeu_loo_bounds(SEXP data, SEXP node_sizes, SEXP imp_fam_mask, SEX
  * optimal parent set of every node WITHOUT recomputing the family scores from
  * scratch. The full-data family scores (aflml) are supplied; a removal shifts
  * each family score by the closed-form delta of the single contingency cell the
- * removed row occupies (precomputed once per cell), after which only the cheap
- * SM dynamic program is re-run. Total cost O(N * p * 2^p) instead of the naive
- * O(N^2 * ...) that re-counts for every row.
+ * removed row occupies (precomputed once per cell), after which only the SM
+ * dynamic program is re-run.
+ *
+ * Phase 1 counts every family once on the K distinct row patterns (O(K) per family,
+ * see subset_walk) and stores the removal delta of every occupied cell (memory: all
+ * admissible count tables, independent of N). Phase 2 runs once per distinct pattern:
+ * the score shift costs O(2^p + families) (the parent-configuration index of a
+ * candidate set extends that of the set without its highest element) and the DP
+ * O(p^2 2^p); rows with the same pattern share the result. Total
+ * O(N p log N + K p 2^p + cells + K p^2 2^p).
  *
  * Returns an integer matrix [n_ex, n_nodes]; entry [o, i] is the 0-indexed
  * parent-set bitmask of node i in the optimal DAG for D \ {row o}.
@@ -487,18 +644,18 @@ SEXP bnstruct_loo_parents_score(SEXP data, SEXP node_sizes, SEXP imp_fam_mask, S
 {
 	unsigned int i, k;
 	R_len_t s;
-	unsigned int *d = (unsigned int *)INTEGER(data);
+	const unsigned int *d = (const unsigned int *)INTEGER(data);
 	unsigned int n_nodes = ncols(data);
 	unsigned int n_ex = nrows(data);
-	unsigned int *ns = (unsigned int *)INTEGER(node_sizes);
-	unsigned int *ifm = (unsigned int *)INTEGER(imp_fam_mask);
+	const int *ns = INTEGER(node_sizes);
+	const int *ifm = INTEGER(imp_fam_mask);
 	unsigned int pow_nodes = ncols(imp_fam_mask);
 	double alpha = *(REAL(ess));
 	int scoring_func = *INTEGER(func);
 	double *aflml = REAL(aflml_sexp);
 	unsigned int *pa = (unsigned int *)R_alloc(n_nodes, sizeof(unsigned int));
 	unsigned int mask1 = 1;
-	R_xlen_t nfam = (R_xlen_t)n_nodes * pow_nodes;
+	R_xlen_t nfam = (R_xlen_t)n_nodes * pow_nodes, t, u;
 
 	/* ---- Phase 1: per-cell removal deltas for every feasible family ---- */
 	R_xlen_t *offset = (R_xlen_t *)R_alloc(nfam, sizeof(R_xlen_t));
@@ -519,167 +676,128 @@ SEXP bnstruct_loo_parents_score(SEXP data, SEXP node_sizes, SEXP imp_fam_mask, S
 			offset[pos] = total;
 			total += q * ns[i];
 		}
-
 	double *cell_delta = (double *)R_alloc(total > 0 ? total : 1, sizeof(double));
-	for (R_xlen_t t = 0; t < total; t++)
+	for (t = 0; t < total; t++)
 		cell_delta[t] = 0.0;
 
-	for (s = 0; s < (R_len_t)pow_nodes; s++)
+	unsigned int maxsize;
+	R_xlen_t maxcells, maxq;
+	admissible_extent(ifm, ns, n_nodes, pow_nodes, &maxsize, &maxcells, &maxq);
+	row_patterns rp;
+	build_row_patterns(d, n_ex, n_nodes, &rp);
+	R_xlen_t K = rp.n;
+	double *counts = (double *)R_alloc(maxcells, sizeof(double));
+	double *nij = (double *)R_alloc(maxq, sizeof(double));
+	for (t = 0; t < maxcells; t++)
+		counts[t] = 0.0;
+	for (t = 0; t < maxq; t++)
+		nij[t] = 0.0;
+	R_xlen_t *touched = (R_xlen_t *)R_alloc(K > 0 ? K : 1, sizeof(R_xlen_t));
+
+	subset_walk w;
+	walk_init(&w, &rp, n_nodes, ns, maxsize);
+	while (walk_next(&w))
+	{
+		unsigned int P = WALK_SET(&w);
+		R_xlen_t q = WALK_Q(&w);
+		const R_xlen_t *pc = WALK_PC(&w);
 		for (i = 0; i < n_nodes; i++)
 		{
-			R_xlen_t pos = (R_xlen_t)s * n_nodes + i;
+			R_xlen_t pos = (R_xlen_t)P * n_nodes + i;
 			if (offset[pos] < 0)
 				continue;
-			unsigned int npa = get_bits(s, pa, n_nodes);
 			int r_i = ns[i];
-			int cum[npa + 2];
-			int strides[npa + 1];
-			int q = 1;
-			cum[0] = 1;
-			cum[1] = r_i;
-			for (k = 0; k < npa; k++)
-			{
-				cum[k + 2] = cum[k + 1] * ns[pa[k]];
-				q *= ns[pa[k]];
-			}
-			strides[0] = i * n_ex;
-			for (k = 0; k < npa; k++)
-				strides[k + 1] = pa[k] * n_ex;
-
-			int ncells = q * r_i;
-			double *counts = (double *)calloc(ncells, sizeof(double));
-			if (counts == NULL)
-				error("memory allocation failed in bnstruct_loo_parents");
-
-			unsigned int ex;
-			for (ex = 0; ex < n_ex; ex++)
-			{
-				int index = 0;
-				unsigned int jj;
-				int bad = 0;
-				for (jj = 0; jj < npa + 1; jj++)
+			const int *xi = rp.x + (R_xlen_t)i * K;
+			double n_fam = 0.0;
+			R_xlen_t nt = 0, tt;
+			for (u = 0; u < K; u++)
+				if (xi[u] != NA_INTEGER && pc[u] >= 0)
 				{
-					int elmt = d[ex + strides[jj]];
-					if (elmt == NA_INTEGER)
-					{
-						bad = 1;
-						break;
-					}
-					index += (elmt - 1) * cum[jj];
+					R_xlen_t cell = pc[u] * r_i + (xi[u] - 1);
+					if (counts[cell] == 0.0)
+						touched[nt++] = cell;
+					counts[cell] += rp.w[u];
+					nij[pc[u]] += rp.w[u];
+					n_fam += rp.w[u];
 				}
-				if (bad)
-					continue;
-				counts[index] += 1;
-			}
-
 			double a_ij = alpha / (double)q;
 			double a_ijk = alpha / (double)(q * r_i);
-
-			double n_fam = 0.0;
-			for (k = 0; k < (unsigned int)ncells; k++)
-				n_fam += counts[k];
 			double pen_relief = 0.0;
 			if (scoring_func == 2 && n_fam >= 2.0)
 				pen_relief = 0.5 * (double)q * (double)(r_i - 1) *
 							 log(n_fam / (n_fam - 1.0));
-
-			int pc;
-			for (pc = 0; pc < q; pc++)
+			for (tt = 0; tt < nt; tt++)
 			{
-				int base = pc * r_i;
-				double n_ij = 0.0;
-				for (k = 0; k < (unsigned int)r_i; k++)
-					n_ij += counts[base + k];
-				if (n_ij < 1.0)
-					continue;
-				for (k = 0; k < (unsigned int)r_i; k++)
-				{
-					double n_ijk = counts[base + k];
-					if (n_ijk < 1.0)
-						continue;
-					cell_delta[offset[pos] + base + k] =
-						(scoring_func == 0)
-							? log(a_ij + n_ij - 1.0) - log(a_ijk + n_ijk - 1.0)
-							: loo_f_cell(n_ij) - loo_f_cell(n_ijk) + pen_relief;
-				}
+				R_xlen_t cell = touched[tt];
+				double n_ij = nij[cell / r_i], n_ijk = counts[cell];
+				cell_delta[offset[pos] + cell] =
+					(scoring_func == 0)
+						? log(a_ij + n_ij - 1.0) - log(a_ijk + n_ijk - 1.0)
+						: loo_f_cell(n_ij) - loo_f_cell(n_ijk) + pen_relief;
 			}
-			free(counts);
+			for (tt = 0; tt < nt; tt++)
+			{
+				counts[touched[tt]] = 0.0;
+				nij[touched[tt] / r_i] = 0.0;
+			}
 		}
+	}
 
-	/* ---- Phase 2: per removed row, shift scores and re-run the SM DP ---- */
+	/* ---- Phase 2: per distinct row pattern, shift scores and re-run the SM DP ---- */
 	SEXP res;
 	PROTECT(res = allocMatrix(INTSXP, n_ex, n_nodes));
 	int *out = INTEGER(res);
-	{
-		R_xlen_t t;
-		for (t = 0; t < (R_xlen_t)n_ex * n_nodes; t++)
-			out[t] = 0;
-	}
-
+	for (t = 0; t < (R_xlen_t)n_ex * n_nodes; t++)
+		out[t] = 0;
 	double *A = (double *)R_alloc(nfam, sizeof(double));
 	int *bps = (int *)R_alloc(nfam, sizeof(int));
 	double *bss = (double *)R_alloc(nfam, sizeof(double));
 	int *sinks = (int *)R_alloc(pow_nodes, sizeof(int));
 	double *fsc = (double *)R_alloc(pow_nodes, sizeof(double));
 
-	/* The optimum on D \ {o} depends on o only through its values: the row enters
-	 * phase 2 solely through the cells it occupies. Rows are therefore grouped by
-	 * pattern (missing values included), the DP runs once per distinct pattern, and
-	 * the result is copied to every row of the group. Exact: identical output. */
-	unsigned int *ord = (unsigned int *)R_alloc(n_ex, sizeof(unsigned int));
-	unsigned int g, h;
-	for (g = 0; g < n_ex; g++)
-		ord[g] = g;
-	loo_sort_rows(d, n_ex, n_nodes, ord);
-
-	unsigned int o;
-	for (g = 0; g < n_ex; g = h)
+	/* parent-configuration strides and highest element of every candidate set */
+	R_xlen_t *qs = (R_xlen_t *)R_alloc(pow_nodes, sizeof(R_xlen_t));
+	int *hi = (int *)R_alloc(pow_nodes, sizeof(int));
+	R_xlen_t *pcs = (R_xlen_t *)R_alloc(pow_nodes, sizeof(R_xlen_t));
+	qs[0] = 1;
+	hi[0] = -1;
+	for (s = 1; s < (R_len_t)pow_nodes; s++)
 	{
-		o = ord[g];
-		for (h = g + 1; h < n_ex && loo_rows_equal(d, n_ex, n_nodes, ord[g], ord[h]); h++)
-			;
-		R_xlen_t t;
+		hi[s] = (s == 1) ? 0 : hi[s >> 1] + 1;
+		qs[s] = qs[s ^ (mask1 << hi[s])] * ns[hi[s]];
+	}
+
+	for (u = 0; u < K; u++)
+	{
+		unsigned int o = rp.ord[rp.start[u]];
 		for (t = 0; t < nfam; t++)
 			A[t] = aflml[t];
 
-		/* Shift each feasible family by the delta of row o's cell.
-		 *
-		 * The parent-configuration index
-		 *     pc = sum_k (x_{pa[k]} - 1) * prod_{l<k} r_{pa[l]}
-		 * depends only on the candidate set s and the row, NOT on the child i,
-		 * and phase 1 laid the cells out as [offset + pc * r_i + (child - 1)].
-		 * So the bit list and pc are computed once per (row, s) rather than once
-		 * per (row, s, i), leaving O(1) work in the innermost loop. */
+		/* Shift each feasible family (i, s) by the delta of the pattern's cell,
+		 *     pc(s) = sum_k (x_{pa[k]} - 1) * prod_{l<k} r_{pa[l]},
+		 * cells laid out by phase 1 as [offset + pc * r_i + (child - 1)]; pc(s) is
+		 * obtained from pc(s without its highest element), -1 if a parent is missing
+		 * (every family of s then shifts by 0). */
+		pcs[0] = 0;
+		for (s = 1; s < (R_len_t)pow_nodes; s++)
+		{
+			unsigned int rest = (unsigned int)s ^ (mask1 << hi[s]);
+			int ev = rp.x[u + (R_xlen_t)hi[s] * K];
+			pcs[s] = (pcs[rest] < 0 || ev == NA_INTEGER) ? -1 : pcs[rest] + (R_xlen_t)(ev - 1) * qs[rest];
+		}
 		for (s = 0; s < (R_len_t)pow_nodes; s++)
 		{
-			unsigned int npa = get_bits(s, pa, n_nodes);
-			int pc = 0;
-			int pcstride = 1;
-			int bad = 0;
-			for (k = 0; k < npa; k++)
-			{
-				int ev = d[o + pa[k] * n_ex];
-				if (ev == NA_INTEGER)
-				{
-					bad = 1;
-					break;
-				}
-				pc += (ev - 1) * pcstride;
-				pcstride *= ns[pa[k]];
-			}
-			/* row incomplete in this candidate set: every family (i, s) shifts by 0 */
-			if (bad)
+			if (pcs[s] < 0)
 				continue;
-
 			for (i = 0; i < n_nodes; i++)
 			{
 				R_xlen_t pos = (R_xlen_t)s * n_nodes + i;
 				if (offset[pos] < 0)
 					continue;
-				int ei = d[o + i * n_ex];
+				int ei = rp.x[u + (R_xlen_t)i * K];
 				if (ei == NA_INTEGER)
 					continue;
-				A[pos] += cell_delta[offset[pos] + (R_xlen_t)pc * ns[i] + (ei - 1)];
+				A[pos] += cell_delta[offset[pos] + pcs[s] * ns[i] + (ei - 1)];
 			}
 		}
 
@@ -738,10 +856,10 @@ SEXP bnstruct_loo_parents_score(SEXP data, SEXP node_sizes, SEXP imp_fam_mask, S
 		}
 
 		/* same pattern, same optimum */
-		unsigned int u;
-		for (u = g + 1; u < h; u++)
+		unsigned int g;
+		for (g = rp.start[u] + 1; g < rp.start[u + 1]; g++)
 			for (i = 0; i < n_nodes; i++)
-				out[ord[u] + (R_xlen_t)i * n_ex] = out[o + (R_xlen_t)i * n_ex];
+				out[rp.ord[g] + (R_xlen_t)i * n_ex] = out[o + (R_xlen_t)i * n_ex];
 	}
 
 	UNPROTECT(1);
@@ -1196,42 +1314,10 @@ SEXP bnstruct_fumt_mask(SEXP n_elements, SEXP pattern)
 
 SEXP bnstruct_all_fam_log_marg_lik(SEXP data, SEXP node_sizes, SEXP imp_fam_mask, SEXP iss, SEXP func)
 {
-	unsigned int i, j, n_pa, pos;
-
-	// get inputs
-	unsigned int *d = (unsigned int *)INTEGER(data);
-	unsigned int n_nodes = ncols(data);
-	unsigned int n_ex = nrows(data);
-	unsigned int *ns = (unsigned int *)INTEGER(node_sizes);
-	unsigned int *ifm = (unsigned int *)INTEGER(imp_fam_mask);
-	unsigned int pow_nodes = ncols(imp_fam_mask);
-	double alpha = *(REAL(iss));
-	unsigned int scoring_func = *INTEGER(func);
-	unsigned int *pa = (unsigned int *)R_alloc(n_nodes, sizeof(unsigned int));
-
-	// allocate and initialize output
-	SEXP result;
-	PROTECT(result = allocMatrix(REALSXP, n_nodes, pow_nodes));
-	double *aflml = REAL(result);
-	for (i = 0; i < n_nodes * pow_nodes; i++)
-		aflml[i] = R_NegInf;
-
-	// compute log likelihood
-	for (i = 0; i < n_nodes; i++)
-		for (j = 0; j < pow_nodes; j++)
-		{
-			pos = j * n_nodes + i;
-			if (ifm[pos])
-			{
-				// Rprintf("get bits\n");
-				n_pa = get_bits(j, pa, n_nodes);
-				// Rprintf("log lik, node %d, n parents %d\n",i,n_pa);
-				aflml[pos] = score_node_1((unsigned int *)d, n_nodes, n_ex, (unsigned int *)ns, i, (unsigned int *)pa, n_pa, scoring_func, alpha);
-				// bdeu_score( d, n_nodes, n_ex, ns, i, pa, n_pa, alpha );
-				// Rprintf("end\n");
-			}
-		}
-
+	/* family scores on the distinct row patterns (see family_scores_bounds); identical
+	 * to scoring every family with score_node_1 */
+	SEXP all = PROTECT(family_scores_bounds(data, node_sizes, imp_fam_mask, *REAL(iss), *INTEGER(func), 1, 0));
+	SEXP result = VECTOR_ELT(all, 0);
 	UNPROTECT(1);
 	return result;
 }
@@ -1560,81 +1646,69 @@ SEXP bnstruct_coupled_parent_margins(SEXP aflml_s, SEXP bps_s, SEXP ifm_s, SEXP 
  * where Delta is the one-row removal delta of the selected score (0 when the row is
  * incomplete in the family), for every node i, every admissible family P of i and
  * every reference parent set R = refs[i, t] (column t = one witness network).
- * c(i, R, R) = 0 exactly. Rows enter only through their distinct patterns: each family
- * is counted over all rows once, then evaluated at one representative row per pattern.
+ * c(i, R, R) = 0 exactly. Rows enter only through their K distinct patterns: each
+ * family is counted once on the patterns and its delta evaluated at every pattern,
+ * O(K) per family (subset_walk), then compared with the deltas of node i's distinct
+ * references, O(D K) per family. Total O(N p log N + D K p 2^p); memory O(p 2^p D)
+ * for the output plus O(p K + D K + largest count table).
  * Returns list(values, ref_index): values[i, P + 1, ref_index[i, t] + 1] is the
  * coupling of node i, family P and witness column t; inadmissible entries are 0.
  * ------------------------------------------------------------------------------------ */
-static void family_pattern_deltas(const unsigned int *d, unsigned int n_ex, unsigned int n_nodes,
-								  const int *ns, unsigned int i, unsigned int sset, double alpha,
-								  int scoring_func, const unsigned int *reps, unsigned int n_reps,
-								  unsigned int *pa, double *out)
-{
-	unsigned int npa = get_bits(sset, pa, n_nodes), k, ex, u;
-	int r_i = ns[i];
-	int cum[npa + 2];
-	R_xlen_t strides[npa + 1];
-	int q = 1;
-	cum[0] = 1;
-	cum[1] = r_i;
-	for (k = 0; k < npa; k++)
-	{
-		cum[k + 2] = cum[k + 1] * ns[pa[k]];
-		q *= ns[pa[k]];
-	}
-	strides[0] = (R_xlen_t)i * n_ex;
-	for (k = 0; k < npa; k++)
-		strides[k + 1] = (R_xlen_t)pa[k] * n_ex;
 
-	int ncells = q * r_i;
-	double *counts = (double *)calloc(ncells, sizeof(double));
+/* removal delta of family (i, pa) at every pattern, counting on the patterns directly */
+static void family_deltas_at_patterns(const row_patterns *rp, unsigned int n_nodes, const int *ns,
+									  unsigned int i, unsigned int sset, double alpha, int scoring_func,
+									  unsigned int *pa, double *out)
+{
+	unsigned int npa = get_bits(sset, pa, n_nodes), k;
+	R_xlen_t u, K = rp->n, q = 1;
+	int r_i = ns[i];
+	for (k = 0; k < npa; k++)
+		q *= ns[pa[k]];
+	R_xlen_t *pc = (R_xlen_t *)R_alloc(K > 0 ? K : 1, sizeof(R_xlen_t));
+	for (u = 0; u < K; u++)
+	{
+		R_xlen_t idx = 0, stride = 1;
+		int xi = rp->x[u + (R_xlen_t)i * K];
+		pc[u] = (xi == NA_INTEGER) ? -1 : 0;
+		for (k = 0; k < npa && pc[u] >= 0; k++)
+		{
+			int e = rp->x[u + (R_xlen_t)pa[k] * K];
+			if (e == NA_INTEGER)
+				pc[u] = -1;
+			else
+			{
+				idx += (R_xlen_t)(e - 1) * stride;
+				stride *= ns[pa[k]];
+			}
+		}
+		if (pc[u] >= 0)
+			pc[u] = idx * r_i + (xi - 1); /* here pc holds the cell */
+	}
+	double *counts = (double *)calloc(q * r_i, sizeof(double));
 	double *nij = (double *)calloc(q, sizeof(double));
 	if (counts == NULL || nij == NULL)
 		error("memory allocation failed in bnstruct_coupling_rows");
-	for (ex = 0; ex < n_ex; ex++)
-	{
-		int index = 0;
-		unsigned int jj;
-		for (jj = 0; jj < npa + 1; jj++)
-		{
-			int elmt = (int)d[ex + strides[jj]];
-			if (elmt == NA_INTEGER)
-				break;
-			index += (elmt - 1) * cum[jj];
-		}
-		if (jj < npa + 1)
-			continue;
-		counts[index] += 1;
-	}
 	double n_fam = 0.0;
-	int c;
-	for (c = 0; c < ncells; c++)
-	{
-		n_fam += counts[c];
-		nij[c / r_i] += counts[c];
-	}
+	for (u = 0; u < K; u++)
+		if (pc[u] >= 0)
+		{
+			counts[pc[u]] += rp->w[u];
+			nij[pc[u] / r_i] += rp->w[u];
+			n_fam += rp->w[u];
+		}
 	double a_ij = alpha / (double)q, a_ijk = alpha / (double)(q * r_i);
 	double pen_relief = 0.0;
 	if (scoring_func == 2 && n_fam >= 2.0)
 		pen_relief = 0.5 * (double)q * (double)(r_i - 1) * log(n_fam / (n_fam - 1.0));
-
-	for (u = 0; u < n_reps; u++)
+	for (u = 0; u < K; u++)
 	{
-		unsigned int o = reps[u], jj;
-		int index = 0;
-		for (jj = 0; jj < npa + 1; jj++)
-		{
-			int elmt = (int)d[o + strides[jj]];
-			if (elmt == NA_INTEGER)
-				break;
-			index += (elmt - 1) * cum[jj];
-		}
-		if (jj < npa + 1)
+		if (pc[u] < 0)
 		{
 			out[u] = 0.0;
 			continue;
 		}
-		double n1 = nij[index / r_i], n2 = counts[index];
+		double n1 = nij[pc[u] / r_i], n2 = counts[pc[u]];
 		out[u] = (scoring_func == 0) ? log(a_ij + n1 - 1.0) - log(a_ijk + n2 - 1.0)
 									 : loo_f_cell(n1) - loo_f_cell(n2) + pen_relief;
 	}
@@ -1652,20 +1726,9 @@ SEXP bnstruct_coupling_rows(SEXP data, SEXP node_sizes, SEXP imp_fam_mask, SEXP 
 	int scoring_func = *INTEGER(func);
 	unsigned int *pa = (unsigned int *)R_alloc(n_nodes, sizeof(unsigned int));
 
-	/* one representative row per distinct pattern */
-	unsigned int *ord = (unsigned int *)R_alloc(n_ex > 0 ? n_ex : 1, sizeof(unsigned int));
-	unsigned int *reps = (unsigned int *)R_alloc(n_ex > 0 ? n_ex : 1, sizeof(unsigned int));
-	unsigned int g, h, n_reps = 0;
-	for (g = 0; g < n_ex; g++)
-		ord[g] = g;
-	if (n_ex > 0)
-		loo_sort_rows(d, n_ex, n_nodes, ord);
-	for (g = 0; g < n_ex; g = h)
-	{
-		reps[n_reps++] = ord[g];
-		for (h = g + 1; h < n_ex && loo_rows_equal(d, n_ex, n_nodes, ord[g], ord[h]); h++)
-			;
-	}
+	row_patterns rp;
+	build_row_patterns(d, n_ex, n_nodes, &rp);
+	R_xlen_t K = rp.n;
 
 	/* distinct reference sets per node: ref_index[i, t] = position of refs[i, t] among
 	 * node i's distinct references (0-based); the value array holds one slice per
@@ -1675,8 +1738,8 @@ SEXP bnstruct_coupling_rows(SEXP data, SEXP node_sizes, SEXP imp_fam_mask, SEXP 
 	int *ref_index = INTEGER(ref_index_s);
 	unsigned int *distinct = (unsigned int *)R_alloc((R_xlen_t)n_nodes * (n_refs > 0 ? n_refs : 1), sizeof(unsigned int));
 	unsigned int *n_dist = (unsigned int *)R_alloc(n_nodes, sizeof(unsigned int));
-	unsigned int i, m, P, u, max_dist = 1;
-	R_xlen_t t;
+	unsigned int i, m, max_dist = 1;
+	R_xlen_t t, u;
 	for (i = 0; i < n_nodes; i++)
 	{
 		n_dist[i] = 0;
@@ -1705,32 +1768,85 @@ SEXP bnstruct_coupling_rows(SEXP data, SEXP node_sizes, SEXP imp_fam_mask, SEXP 
 	for (t = 0; t < npk * max_dist; t++)
 		out[t] = 0.0;
 
-	double *dP = (double *)R_alloc(n_reps > 0 ? n_reps : 1, sizeof(double));
-	double *dR = (double *)R_alloc((n_reps > 0 ? n_reps : 1) * (R_xlen_t)max_dist, sizeof(double));
+	/* deltas of every node's distinct references at the patterns */
+	double *dR = (double *)R_alloc((K > 0 ? K : 1) * (R_xlen_t)n_nodes * max_dist, sizeof(double));
 	for (i = 0; i < n_nodes; i++)
-	{
 		for (m = 0; m < n_dist[i]; m++)
-			family_pattern_deltas(d, n_ex, n_nodes, ns, i, distinct[(R_xlen_t)i * n_refs + m], alpha,
-								  scoring_func, reps, n_reps, pa, dR + (R_xlen_t)m * n_reps);
-		for (P = 0; P < pow_nodes; P++)
+			family_deltas_at_patterns(&rp, n_nodes, ns, i, distinct[(R_xlen_t)i * n_refs + m], alpha,
+									  scoring_func, pa, dR + ((R_xlen_t)i * max_dist + m) * K);
+
+	unsigned int maxsize;
+	R_xlen_t maxcells, maxq;
+	admissible_extent(ifm, ns, n_nodes, pow_nodes, &maxsize, &maxcells, &maxq);
+	double *counts = (double *)R_alloc(maxcells, sizeof(double));
+	double *nij = (double *)R_alloc(maxq, sizeof(double));
+	double *dP = (double *)R_alloc(K > 0 ? K : 1, sizeof(double));
+	double *dcell = (double *)R_alloc(maxcells, sizeof(double));
+	R_xlen_t *touched = (R_xlen_t *)R_alloc(K > 0 ? K : 1, sizeof(R_xlen_t)), nt, tt;
+	for (t = 0; t < maxcells; t++)
+		counts[t] = 0.0;
+	for (t = 0; t < maxq; t++)
+		nij[t] = 0.0;
+
+	subset_walk w;
+	walk_init(&w, &rp, n_nodes, ns, maxsize);
+	while (walk_next(&w))
+	{
+		unsigned int P = WALK_SET(&w);
+		R_xlen_t q = WALK_Q(&w);
+		const R_xlen_t *pc = WALK_PC(&w);
+		for (i = 0; i < n_nodes; i++)
 		{
-			if (!ifm[(R_xlen_t)P * n_nodes + i])
+			R_xlen_t pos = (R_xlen_t)P * n_nodes + i;
+			if (!ifm[pos])
 				continue;
-			family_pattern_deltas(d, n_ex, n_nodes, ns, i, P, alpha, scoring_func, reps, n_reps, pa, dP);
+			int r_i = ns[i];
+			const int *xi = rp.x + (R_xlen_t)i * K;
+			double n_fam = 0.0;
+			nt = 0;
+			for (u = 0; u < K; u++)
+				if (xi[u] != NA_INTEGER && pc[u] >= 0)
+				{
+					R_xlen_t cell = pc[u] * r_i + (xi[u] - 1);
+					if (counts[cell] == 0.0)
+						touched[nt++] = cell;
+					counts[cell] += rp.w[u];
+					nij[pc[u]] += rp.w[u];
+					n_fam += rp.w[u];
+				}
+			double a_ij = alpha / (double)q, a_ijk = alpha / (double)(q * r_i);
+			double pen_relief = 0.0;
+			if (scoring_func == 2 && n_fam >= 2.0)
+				pen_relief = 0.5 * (double)q * (double)(r_i - 1) * log(n_fam / (n_fam - 1.0));
+			/* one delta per occupied cell, then looked up at every pattern */
+			for (tt = 0; tt < nt; tt++)
+			{
+				double n1 = nij[touched[tt] / r_i], n2 = counts[touched[tt]];
+				dcell[touched[tt]] = (scoring_func == 0) ? log(a_ij + n1 - 1.0) - log(a_ijk + n2 - 1.0)
+														 : loo_f_cell(n1) - loo_f_cell(n2) + pen_relief;
+			}
+			for (u = 0; u < K; u++)
+				dP[u] = (xi[u] == NA_INTEGER || pc[u] < 0) ? 0.0 : dcell[pc[u] * r_i + (xi[u] - 1)];
 			for (m = 0; m < n_dist[i]; m++)
 			{
 				double c = 0.0;
-				if (distinct[(R_xlen_t)i * n_refs + m] != P && n_reps > 0)
+				if (distinct[(R_xlen_t)i * n_refs + m] != P && K > 0)
 				{
+					const double *dRm = dR + ((R_xlen_t)i * max_dist + m) * K;
 					c = R_PosInf;
-					for (u = 0; u < n_reps; u++)
+					for (u = 0; u < K; u++)
 					{
-						double x = dR[(R_xlen_t)m * n_reps + u] - dP[u];
+						double x = dRm[u] - dP[u];
 						if (x < c)
 							c = x;
 					}
 				}
-				out[(R_xlen_t)i + (R_xlen_t)P * n_nodes + (R_xlen_t)m * npk] = c;
+				out[pos + (R_xlen_t)m * npk] = c;
+			}
+			for (tt = 0; tt < nt; tt++)
+			{
+				counts[touched[tt]] = 0.0;
+				nij[touched[tt] / r_i] = 0.0;
 			}
 		}
 	}

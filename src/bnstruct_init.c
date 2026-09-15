@@ -16,6 +16,7 @@ extern SEXP bnstruct_fbs(SEXP, SEXP);
 extern SEXP bnstruct_fbs_with_scores(SEXP, SEXP);
 extern SEXP bnstruct_bdeu_loo_bounds(SEXP, SEXP, SEXP, SEXP);
 extern SEXP bnstruct_score_loo_bounds(SEXP, SEXP, SEXP, SEXP, SEXP);
+extern SEXP bnstruct_all_fam_scores_bounds(SEXP, SEXP, SEXP, SEXP, SEXP);
 extern SEXP bnstruct_compute_bg_cons(SEXP, SEXP, SEXP);
 extern SEXP bnstruct_compute_bg_tight(SEXP, SEXP, SEXP, SEXP, SEXP);
 extern SEXP bnstruct_compute_lg_ug_cons(SEXP, SEXP, SEXP, SEXP);
@@ -55,6 +56,7 @@ static const R_CallMethodDef CallEntries[] = {
     {"bnstruct_fbs_with_scores", (DL_FUNC)&bnstruct_fbs_with_scores, 2},
     {"bnstruct_bdeu_loo_bounds", (DL_FUNC)&bnstruct_bdeu_loo_bounds, 4},
     {"bnstruct_score_loo_bounds", (DL_FUNC)&bnstruct_score_loo_bounds, 5},
+    {"bnstruct_all_fam_scores_bounds", (DL_FUNC)&bnstruct_all_fam_scores_bounds, 5},
     {"bnstruct_compute_bg_cons", (DL_FUNC)&bnstruct_compute_bg_cons, 3},
     {"bnstruct_compute_bg_tight", (DL_FUNC)&bnstruct_compute_bg_tight, 5},
     {"bnstruct_compute_lg_ug_cons", (DL_FUNC)&bnstruct_compute_lg_ug_cons, 4},

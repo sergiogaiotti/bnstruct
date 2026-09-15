@@ -335,6 +335,97 @@ sm_na_data <- local({
     X
 })
 
+# ---------------------------------------------------------------------------------------
+# family counting on distinct row patterns (scores, removal bounds, fused pass)
+# ---------------------------------------------------------------------------------------
+
+sm_pattern_cases <- local({
+    set.seed(5)
+    Xd <- rbind(sm_small_data, sm_small_data[rep(1:4, 15), ], sm_na_data)
+    list(list(X = sm_small_data, ns = sm_small_sizes, lay = NULL, mfl = NULL),
+         list(X = Xd, ns = sm_small_sizes, lay = NULL, mfl = NULL),
+         list(X = sm_na_data, ns = sm_small_sizes, lay = NULL, mfl = matrix(2L, 1, 1)),
+         list(X = sm_na_data, ns = sm_small_sizes, lay = c(1L, 1L, 2L, 2L, 3L, 3L),
+              mfl = { m <- matrix(0L, 3, 3); m[1, 3] <- -1L; m[2, 3] <- -1L; m[3, 3] <- 5L; m }),
+         list(X = cbind(sample(1:3, 80, TRUE), sample(1:2, 80, TRUE), sample(1:4, 80, TRUE), sample(1:3, 80, TRUE)),
+              ns = c(3L, 2L, 4L, 3L), lay = NULL, mfl = NULL))
+})
+
+sm_case_ifm <- function(cs) {
+    p <- ncol(cs$X)
+    lay <- if (is.null(cs$lay)) rep(1, p) else cs$lay
+    mfl <- if (is.null(cs$mfl)) matrix(p - 1L, 1, 1) else cs$mfl
+    ifm <- bnstruct:::impossible.family.mask(p, lay, mfl)
+    storage.mode(ifm) <- "integer"
+    ifm
+}
+
+test_that("family scores counted on row patterns equal the per-family scorer", {
+    for (cs in sm_pattern_cases) {
+        X <- cs$X; storage.mode(X) <- "integer"; ns <- as.integer(cs$ns); p <- ncol(X)
+        ifm <- sm_case_ifm(cs)
+        for (sf in 0:2) for (ess in c(1, 0.3)) {
+            af <- .Call("bnstruct_all_fam_log_marg_lik", X, ns, ifm, ess, as.integer(sf), PACKAGE = "bnstruct")
+            for (i in seq_len(p)) for (P in 0:(2^p - 1)) {
+                if (!ifm[i, P + 1]) {
+                    expect_identical(af[i, P + 1], -Inf)
+                    next
+                }
+                pa <- which(bitwAnd(P, 2^(seq_len(p) - 1)) > 0) - 1L
+                ref <- .Call("bnstruct_score_node", X, ns, i - 1L, as.integer(pa), as.numeric(sf), ess, PACKAGE = "bnstruct")
+                expect_identical(af[i, P + 1], ref)
+            }
+        }
+    }
+})
+
+test_that("removal-delta bounds on row patterns equal brute force, and the fused pass equals separate calls", {
+    for (cs in sm_pattern_cases[c(2, 4, 5)]) {
+        X <- cs$X; storage.mode(X) <- "integer"; ns <- as.integer(cs$ns); p <- ncol(X)
+        ifm <- sm_case_ifm(cs)
+        for (sf in c(0L, 2L)) {
+            b <- .Call("bnstruct_score_loo_bounds", X, ns, ifm, 1.0, sf, PACKAGE = "bnstruct")
+            fb <- .Call("bnstruct_all_fam_scores_bounds", X, ns, ifm, 1.0, sf, PACKAGE = "bnstruct")
+            af <- .Call("bnstruct_all_fam_log_marg_lik", X, ns, ifm, 1.0, sf, PACKAGE = "bnstruct")
+            expect_identical(fb$aflml, af)
+            expect_identical(fb[c("lower", "upper", "lower_k", "upper_k")], b)
+            rows <- unique(c(1, 2, which(!complete.cases(X))[1:3], nrow(X)))
+            rows <- rows[!is.na(rows)]
+            ok <- which(ifm == 1L, arr.ind = TRUE)
+            ok <- ok[seq(1, nrow(ok), length.out = min(40, nrow(ok))), , drop = FALSE]
+            for (o in rows) {
+                a2 <- .Call("bnstruct_all_fam_log_marg_lik", X[-o, , drop = FALSE], ns, ifm, 1.0, sf, PACKAGE = "bnstruct")
+                for (f in seq_len(nrow(ok))) {
+                    i <- ok[f, 1]; P1 <- ok[f, 2]
+                    delta <- a2[i, P1] - af[i, P1]
+                    expect_true(delta >= b$lower[i, P1] - 1e-9 && delta <= b$upper[i, P1] + 1e-9)
+                    k <- X[o, i]
+                    if (!is.na(k)) expect_true(delta >= b$lower_k[i, P1, k] - 1e-9 && delta <= b$upper_k[i, P1, k] + 1e-9)
+                }
+            }
+        }
+    }
+})
+
+test_that("exact leave-one-out on row patterns matches re-learning with missing values and masks", {
+    for (cs in sm_pattern_cases[c(3, 4, 5)]) {
+        X <- cs$X; storage.mode(X) <- "integer"; ns <- as.integer(cs$ns); p <- ncol(X)
+        ifm <- sm_case_ifm(cs)
+        args <- list(ns)
+        if (!is.null(cs$lay)) { args$layering <- cs$lay; args$max.fanin.layers <- cs$mfl }
+        else if (!is.null(cs$mfl)) args$max.fanin <- cs$mfl[1, 1]
+        tab <- do.call(bnstruct:::sm, c(list(X), args, return.tables = TRUE))
+        PM <- .Call("bnstruct_loo_parents_score", X, ns, ifm, 1.0, tab$aflml, 0L, PACKAGE = "bnstruct")
+        bit <- 2^(seq_len(p) - 1)
+        rows <- unique(c(1, which(!complete.cases(X))[1], nrow(X)))
+        for (o in rows[!is.na(rows)]) {
+            t2 <- do.call(bnstruct:::sm, c(list(X[-o, , drop = FALSE]), args, return.tables = TRUE))
+            score_loo <- sum(vapply(seq_len(p), function(v) t2$aflml[v, PM[o, v] + 1], 0))
+            expect_equal(score_loo, t2$F[2^p], tolerance = 1e-9)
+        }
+    }
+})
+
 test_that("bnstruct_coupled_parent_margins matches the per-decision R witness", {
     for (case in list(list(sm_small_data, sm_small_sizes), list(sm_na_data, sm_small_sizes),
                       list(sm_chain_data, sm_chain_sizes))) {

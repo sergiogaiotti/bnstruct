@@ -35,5 +35,9 @@ double bdeu_score( unsigned int * d, unsigned int n_nodes, unsigned int n_cases,
  */
 double log_likelihood( unsigned int * d, unsigned int n_nodes, unsigned int n_cases, unsigned int * ns,
   unsigned int ni, unsigned int * pa, unsigned int n_pa, int func );
+
+/* the two family scores above from a contingency table counts[pc * r_i + k] */
+double bdeu_score_counts( const double * counts, int prod_sizes, int prod_sizes_pa, int r_i, double alpha );
+double log_likelihood_counts( const double * counts, int prod_sizes_pa, unsigned int r_i, int func );
 	
 #endif

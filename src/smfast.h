@@ -25,6 +25,9 @@ SEXP bnstruct_all_fam_log_marg_lik(SEXP data, SEXP node_sizes, SEXP imp_fam_mask
 SEXP bnstruct_bdeu_loo_bounds(SEXP data, SEXP node_sizes, SEXP imp_fam_mask, SEXP ess);
 SEXP bnstruct_score_loo_bounds(SEXP data, SEXP node_sizes, SEXP imp_fam_mask, SEXP ess, SEXP func);
 
+/* family scores and removal-delta bounds from one counting pass */
+SEXP bnstruct_all_fam_scores_bounds(SEXP data, SEXP node_sizes, SEXP imp_fam_mask, SEXP ess, SEXP func);
+
 /* compute conservative Bg bounds */
 SEXP bnstruct_compute_bg_cons(SEXP lower, SEXP upper, SEXP imp_fam_mask);
 
